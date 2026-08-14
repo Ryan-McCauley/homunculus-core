@@ -5,6 +5,8 @@ dist/
 *.log
 .env
 .env.local
+# Backup written by scripts/setup-home-assistant.* — holds the same secrets.
+.env.bak
 private/
 
 # Runtime data cache (surveil hub snapshots/history)

@@ -1,0 +1,6 @@
+# Shell scripts must keep LF endings no matter who clones them — a .sh checked
+# out with CRLF fails on Linux with "bad interpreter: /usr/bin/env bash^M".
+*.sh text eol=lf
+
+# PowerShell is happiest with CRLF on Windows.
+*.ps1 text eol=crlf
