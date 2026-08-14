@@ -1,0 +1,37 @@
+node_modules/
+out/
+dist/
+.DS_Store
+*.log
+.env
+.env.local
+private/
+
+# Runtime data cache (surveil hub snapshots/history)
+data/
+
+# Private financial documents — bank statements etc. NEVER commit these.
+private/
+
+# Claude Code local config, commands, and generated plan/scratch files
+.claude/
+
+# Strategy run reports belong in data/crypto/ (ignored above), but a run launched
+# from the wrong working directory drops them here instead. They carry live balances
+# and P&L, so catch them at the repo root too — see the financial-documents rule above.
+/btc-ladder-report-*.md
+/*-report-*.md
+/*-research-*.md
+
+# Editor workspace definitions (personal, machine-specific)
+*.code-workspace
+
+# Vitest coverage output
+/coverage/
+
+# Python bytecode from the screening engine
+__pycache__/
+*.pyc
+
+# Design mockups — standalone HTML the app never imports, kept on disk only
+/mockups/

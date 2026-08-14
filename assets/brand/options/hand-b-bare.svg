@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-labelledby="tbb dbb">
+  <title id="tbb">Homunculus</title>
+  <desc id="dbb">A symmetric seven-digit hand with an eye in the palm, drawn without the instrument ring.</desc>
+  <g transform="translate(1.92 5.82) scale(0.94)">
+    <path d="M21 37 L23 37.4 L27.5 35.8 L32 35.2 L36.5 35.8 L41 37.4 L43 37 L44 45 L39 51.5 L25 51.5 L20 45 Z"
+          fill="currentColor" opacity="0.14" />
+    <g fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M23 37.4 L22.2 22.8 L20.38 8.18" />
+      <path d="M27.5 35.8 L26.9 21 L26.04 6.18" />
+      <path d="M32 35.2 V5.5" />
+      <path d="M36.5 35.8 L37.1 21 L37.96 6.18" />
+      <path d="M41 37.4 L41.8 22.8 L43.62 8.18" />
+      <path d="M21 37 L20 45 L25 51.5 L39 51.5 L44 45 L43 37" />
+      <path d="M21 37 L23 37.4 L27.5 35.8 L32 35.2 L36.5 35.8 L41 37.4 L43 37" />
+    </g>
+    <g fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round">
+      <path d="M20.4 43 C 15.5 42.2, 10.2 36.5, 6.53 24.7" />
+      <path d="M43.6 43 C 48.5 42.2, 53.8 36.5, 57.47 24.7" />
+    </g>
+    <g fill="currentColor">
+      <circle cx="20.38" cy="8.18" r="2.6" /><circle cx="26.04" cy="6.18" r="2.6" />
+      <circle cx="32" cy="5.5" r="2.6" /><circle cx="37.96" cy="6.18" r="2.6" />
+      <circle cx="43.62" cy="8.18" r="2.6" />
+      <circle cx="6.53" cy="24.7" r="2.6" /><circle cx="57.47" cy="24.7" r="2.6" />
+    </g>
+    <path d="M24.8 44.3 Q32 38.9 39.2 44.3 Q32 49.7 24.8 44.3 Z" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linejoin="round" />
+    <circle cx="32" cy="44.3" r="2.4" fill="currentColor" />
+  </g>
+</svg>

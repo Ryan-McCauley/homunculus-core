@@ -1,0 +1,685 @@
+/* ── Homunculus design tokens ───────────────────────────────────────────
+   The bridge skin: Matrix phosphor-green on near-black, with crimson Bond
+   accents reserved for alerts. Tweak these to re-theme the whole app. */
+:root {
+  /* ── Backgrounds ── */
+  --bg: #03060a;
+  --bg-panel: #050a0e;
+  --bg-elev: #060d10;
+  --bg-meter: #0c1f16;
+
+  /* ── Primary accent ── */
+  --green: #00ff66;
+  --green-soft: #9dffc4;
+  --green-dim: #2f6b4a;
+  --green-line: #0f3d28;
+
+  /* ── Alert / status colors ── */
+  --crimson: #e0245e;
+  --amber: #f5a623;
+  --cool-color: #4aa8ff;
+
+  /* ── Borders / glows ── */
+  --border: #00ff6618;
+  --border-strong: #00ff6633;
+  --border-crimson: #e0245e33;
+  --glow-green: 0 0 6px #00ff6644;
+  --glow-crimson: 0 0 6px #e0245e66;
+  --glow-text: #00ff6655;
+
+  /* ── Typography ── */
+  --font-mono: 'Share Tech Mono', ui-monospace, monospace;
+  --font-display: 'Orbitron', sans-serif;
+  /* The logo wordmark only. Megrim is a hairline alchemical face — never use it
+     below ~18px or for running text; it disappears. */
+  --font-wordmark: 'Megrim', 'Orbitron', sans-serif;
+
+  /* ── Holo accent ── */
+  --holo: #2effb0;
+  --holo-dim: #2f8b6a;
+  --blue: #4aa8ff;
+
+  /* ── Chart indicator palette (distinct from green/crimson candles) ── */
+  --ind-fast: #ffb020; /* MA20  — gold */
+  --ind-slow: #b478ff; /* MA50  — violet */
+  --ind-band: #33bbff; /* Bollinger — cyan */
+  --ind-rsi:  #ff5ea8; /* RSI pane — magenta */
+  --ind-cost: #dfe6f0; /* position cost basis — silver */
+
+  /* ── Holo tile internals ── */
+  --holo-tile-bg: #04140fcc;
+  --holo-tile-border: #2effb04d;
+  --holo-tile-shadow: #2effb01f;
+  --holo-tile-inset: #2effb00d;
+  --holo-text-shadow: #2effb066;
+  --holo-v-shadow: #2effb055;
+  --holo-bar-track: #0a1f14;
+  --holo-bar-glow: #2effb0aa;
+  --holo-btn-bg: #04140f88;
+  --holo-btn-hover-bg: #0a2a1f;
+  --holo-btn-hover-glow: #2effb055;
+  --holo-btn-color: #9dffc4;
+
+  /* ── Navigation tabs ── */
+  --tab-active-bg: #0a1a12;
+  --tab-inactive-bg: #060d10;
+  --tab-glow: #00ff6655;
+
+  /* ── UI chrome ── */
+  --ticker-bg: #04080c;
+  --chart-track: #0c3a26;
+  --range-track: #0a1f14;
+  --card-active-bg: #0f3d28;
+  --card-inactive-bg: #0a1410;
+
+  /* ── SVG body fills ── */
+  --svg-deep: #04140d;
+  --svg-panel: #0a1f14;
+
+  /* ── Chat / ComputerCore ── */
+  --chat-assistant-glow: #00ff6699;
+  --chat-core-glow: #f5a62399;
+  --chat-user-color: #6a7d72;
+  --chat-core-color: #f5d08a;
+  --chat-core-border: #f5a62366;
+  --chat-core-bubble: #0d0a0088;
+
+  /* ── Terminal (xterm) ── */
+  --term-bg: #050a0e;
+  --term-fg: #9dffc4;
+  --term-cursor: #00ff66;
+  --term-selection: #00ff6633;
+  --term-black: #03060a;
+  --term-green: #00ff66;
+  --term-red: #e0245e;
+  --term-white: #9dffc4;
+  --term-bright-white: #d8ffe8;
+
+  /* ── CRT scanline tint ── */
+  --scanline: #00ff6608;
+
+  /* ── Header / footer gradient stops ── */
+  --header-top: #0a0f14;
+  --header-bot: #05080c;
+
+  /* ── Pet / weight chart ── */
+  --weight-stripe: #2effb011;
+}
+
+/* ── Tactical Night Red theme ───────────────────────────────────────────
+   Night-ops palette: near-black base with deep blood tints, authoritative
+   tactical red primary, hot ember holo field, steel-blue for cool HVAC,
+   smoldering amber for status. Easy to read in darkness. */
+[data-theme="occult"] {
+  /* ── Backgrounds (deep blood-tinted black) ── */
+  --bg: #040000;
+  --bg-panel: #080101;
+  --bg-elev: #0d0101;
+  --bg-meter: #130101;
+
+  /* ── Primary — authoritative tactical red (not harsh pure #ff0000) ── */
+  --green: #d93530;
+  --green-soft: #f09090;
+  --green-dim: #651615;
+  --green-line: #350c0b;
+
+  /* ── Alert / status ── */
+  --crimson: #ff5500;
+  --amber: #cc7700;
+  --cool-color: #446688;
+
+  /* ── Borders / glows ── */
+  --border: #d9353018;
+  --border-strong: #d9353033;
+  --border-crimson: #ff550033;
+  --glow-green: 0 0 6px #d9353044;
+  --glow-crimson: 0 0 6px #ff550066;
+  --glow-text: #d9353055;
+
+  /* ── Holo — deep ember field ── */
+  --holo: #cc2800;
+  --holo-dim: #661200;
+  --blue: #bb4422;
+
+  /* ── Chart indicator palette (distinct from the red/orange candles) ── */
+  --ind-fast: #e8b53a; /* MA20  — gold */
+  --ind-slow: #b884ff; /* MA50  — violet */
+  --ind-band: #45c9db; /* Bollinger — cyan */
+  --ind-rsi:  #ff7ab0; /* RSI pane — pink */
+  --ind-cost: #e6dcc8; /* position cost basis — warm parchment */
+
+  /* ── Holo tile internals ── */
+  --holo-tile-bg: #0d0000cc;
+  --holo-tile-border: #cc28004d;
+  --holo-tile-shadow: #cc28001f;
+  --holo-tile-inset: #cc28000d;
+  --holo-text-shadow: #cc280066;
+  --holo-v-shadow: #cc280055;
+  --holo-bar-track: #1e0000;
+  --holo-bar-glow: #cc2800aa;
+  --holo-btn-bg: #0d000088;
+  --holo-btn-hover-bg: #220000;
+  --holo-btn-hover-glow: #cc280055;
+  --holo-btn-color: #f09090;
+
+  /* ── Navigation tabs ── */
+  --tab-active-bg: #1a0202;
+  --tab-inactive-bg: #0c0101;
+  --tab-glow: #d9353055;
+
+  /* ── UI chrome ── */
+  --ticker-bg: #060000;
+  --chart-track: #220303;
+  --range-track: #1a0202;
+  --card-active-bg: #220303;
+  --card-inactive-bg: #120101;
+
+  /* ── SVG body fills ── */
+  --svg-deep: #0d0000;
+  --svg-panel: #1a0300;
+
+  /* ── Chat / ComputerCore ── */
+  --chat-assistant-glow: #d9353099;
+  --chat-core-glow: #cc770099;
+  --chat-user-color: #7a3535;
+  --chat-core-color: #e8aa55;
+  --chat-core-border: #cc770044;
+  --chat-core-bubble: #0f040088;
+
+  /* ── Terminal (xterm) ── */
+  --term-bg: #040000;
+  --term-fg: #f09090;
+  --term-cursor: #d93530;
+  --term-selection: #d9353033;
+  --term-black: #040000;
+  --term-green: #d93530;
+  --term-red: #ff5500;
+  --term-white: #f09090;
+  --term-bright-white: #ffd0c8;
+
+  /* ── CRT scanline tint ── */
+  --scanline: #cc000008;
+
+  /* ── Header / footer gradient stops ── */
+  --header-top: #0e0000;
+  --header-bot: #060000;
+
+  /* ── Pet / weight chart ── */
+  --weight-stripe: #d9353011;
+}
+
+/* ── Prism (holographic rainbow) theme ──────────────────────────────────
+   Iridescent light-field over deep indigo-black. Cyan primary bleeding to
+   violet and hot magenta, with animated rainbow sweeps on headers, scan
+   lines, and progress fills (see the [data-theme="prism"] rules further
+   down). Solid tokens stay readable; the motion lives on decorative edges. */
+[data-theme="prism"] {
+  /* ── Backgrounds (deep indigo-black) ── */
+  --bg: #05030a;
+  --bg-panel: #08050f;
+  --bg-elev: #0b0716;
+  --bg-meter: #120a20;
+
+  /* ── Primary — holographic cyan ── */
+  --green: #38e8ff;
+  --green-soft: #c9b8ff;
+  --green-dim: #6a4a8f;
+  --green-line: #2a1a4a;
+
+  /* ── Alert / status ── */
+  --crimson: #ff3d9a;
+  --amber: #ffcc44;
+  --cool-color: #7aa8ff;
+
+  /* ── Borders / glows ── */
+  --border: #38e8ff1e;
+  --border-strong: #a878ff40;
+  --border-crimson: #ff3d9a33;
+  --glow-green: 0 0 6px #38e8ff55;
+  --glow-crimson: 0 0 6px #ff3d9a66;
+  --glow-text: #a878ff66;
+
+  /* ── Holo — iridescent field ── */
+  --holo: #46f0ff;
+  --holo-dim: #8a6ad0;
+  --blue: #7aa8ff;
+
+  /* ── Chart indicator palette (distinct from the cyan/pink candles) ── */
+  --ind-fast: #ffc24d; /* MA20  — gold */
+  --ind-slow: #62ff9d; /* MA50  — green */
+  --ind-band: #b08cff; /* Bollinger — violet */
+  --ind-rsi:  #ff9d42; /* RSI pane — orange */
+  --ind-cost: #e8f0ff; /* position cost basis — cool white */
+
+  /* ── Iridescent gradient (used by animated prism rules below) ── */
+  --prism-grad: linear-gradient(100deg, #46f0ff, #a878ff, #ff3d9a, #ffcc44, #46f0ff);
+
+  /* ── Holo tile internals ── */
+  --holo-tile-bg: #0b0716cc;
+  --holo-tile-border: #a878ff4d;
+  --holo-tile-shadow: #46f0ff26;
+  --holo-tile-inset: #c060ff14;
+  --holo-text-shadow: #46f0ff66;
+  --holo-v-shadow: #c060ff66;
+  --holo-bar-track: #1a1030;
+  --holo-bar-glow: #46f0ffaa;
+  --holo-btn-bg: #0b0716aa;
+  --holo-btn-hover-bg: #1a1030;
+  --holo-btn-hover-glow: #c060ff66;
+  --holo-btn-color: #c9b8ff;
+
+  /* ── Navigation tabs ── */
+  --tab-active-bg: #180f30;
+  --tab-inactive-bg: #0b0716;
+  --tab-glow: #a878ff55;
+
+  /* ── UI chrome ── */
+  --ticker-bg: #060410;
+  --chart-track: #241245;
+  --range-track: #1a1030;
+  --card-active-bg: #241245;
+  --card-inactive-bg: #100a20;
+
+  /* ── SVG body fills ── */
+  --svg-deep: #0b0716;
+  --svg-panel: #1a1030;
+
+  /* ── Chat / ComputerCore ── */
+  --chat-assistant-glow: #46f0ff99;
+  --chat-core-glow: #ffcc4499;
+  --chat-user-color: #6a5a8a;
+  --chat-core-color: #ffe08a;
+  --chat-core-border: #ffcc4444;
+  --chat-core-bubble: #0d081688;
+
+  /* ── Terminal (xterm) ── */
+  --term-bg: #05030a;
+  --term-fg: #c9b8ff;
+  --term-cursor: #46f0ff;
+  --term-selection: #a878ff33;
+  --term-black: #05030a;
+  --term-green: #46f0ff;
+  --term-red: #ff3d9a;
+  --term-white: #c9b8ff;
+  --term-bright-white: #eee0ff;
+
+  /* ── CRT scanline tint ── */
+  --scanline: #a878ff08;
+
+  /* ── Header / footer gradient stops ── */
+  --header-top: #0e0a1c;
+  --header-bot: #06040e;
+
+  /* ── Pet / weight chart ── */
+  --weight-stripe: #a878ff11;
+}
+
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--green-soft);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* CRT scanline overlay, applied to the whole app frame. */
+.crt-scan::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 50;
+  background: repeating-linear-gradient(
+    0deg,
+    var(--scanline) 0,
+    var(--scanline) 1px,
+    transparent 1px,
+    transparent 4px
+  );
+  opacity: 0.3;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Shared panel label used across every module. */
+.panel-label {
+  font-size: 12px;
+  letter-spacing: 2px;
+  color: var(--green);
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  text-transform: uppercase;
+}
+.panel-label .muted {
+  color: var(--green-dim);
+}
+.panel-label .alert {
+  color: var(--crimson);
+}
+
+.card {
+  background: var(--bg-panel);
+  border: 0.5px solid var(--border);
+  border-radius: 4px;
+  padding: 9px;
+}
+
+@keyframes blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+/* ── Crypto chart: live-price line + buy/sell fill-arrow animations ── */
+@keyframes chartPricePulse {
+  0%, 100% { opacity: 0.35; }
+  50%      { opacity: 1; }
+}
+/* Radar "ping" at the live price — expands and fades (animates the SVG r attr). */
+@keyframes chartPricePing {
+  0%   { r: 2.5; opacity: 0.75; }
+  70%  { r: 9;   opacity: 0; }
+  100% { r: 9;   opacity: 0; }
+}
+/* Fill arrows gently bob toward the price and back, as if tapping at it. */
+@keyframes chartArrowBobUp {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-3px); }
+}
+@keyframes chartArrowBobDown {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(3px); }
+}
+/* Resting-order line: a slower, gentler pulse than the live price so an open
+   buy/sell draws the eye without competing with the current-price heartbeat. */
+@keyframes chartOrderPulse {
+  0%, 100% { opacity: 0.5; }
+  50%      { opacity: 1; }
+}
+.chart-price-line { animation: chartPricePulse 1.6s ease-in-out infinite; }
+.chart-price-ping { animation: chartPricePing 1.6s ease-out infinite; }
+.chart-arrow-buy  { animation: chartArrowBobUp 1.5s ease-in-out infinite; }
+.chart-arrow-sell { animation: chartArrowBobDown 1.5s ease-in-out infinite; }
+.chart-order-line { animation: chartOrderPulse 2s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .chart-price-line, .chart-price-ping,
+  .chart-arrow-buy, .chart-arrow-sell, .chart-order-line { animation: none; }
+}
+
+/* ── Holographic device tiles ────────────────────────────────────────────
+   Shared motion/skin for the HOME-tab device tiles. Aqua-green light field
+   (--holo) over the bridge green, with drift / scan / flicker movement.
+   --holo, --holo-dim, and --blue live in the main :root block above so that
+   [data-theme] overrides them correctly (same specificity, source order). */
+
+@keyframes holo-flicker {
+  0%, 100% { opacity: 0.97; }
+  48% { opacity: 0.9; }
+  50% { opacity: 1; }
+  52% { opacity: 0.93; }
+}
+@keyframes holo-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+@keyframes holo-scan {
+  0% { transform: translateY(-100%); opacity: 0; }
+  12% { opacity: 1; }
+  88% { opacity: 1; }
+  100% { transform: translateY(1000%); opacity: 0; }
+}
+@keyframes holo-radar {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+@keyframes holo-rise {
+  0% { transform: translateY(8px); opacity: 0; }
+  50% { opacity: 0.8; }
+  100% { transform: translateY(-26px); opacity: 0; }
+}
+@keyframes holo-alert {
+  0%, 100% { box-shadow: 0 0 3px #e0245e88; border-color: #e0245e66; }
+  50% { box-shadow: 0 0 12px #e0245ecc; border-color: #e0245e; }
+}
+
+/* A holographic tile: translucent panel, aqua edge, notched corners, a slow
+   sweeping scan line, and a faint floating drift. */
+.holo {
+  position: relative;
+  overflow: hidden;
+  background: var(--holo-tile-bg);
+  border: 0.5px solid var(--holo-tile-border);
+  border-radius: 4px;
+  padding: 10px 12px;
+  box-shadow: 0 0 14px var(--holo-tile-shadow), inset 0 0 18px var(--holo-tile-inset);
+  clip-path: polygon(0 0, calc(100% - 11px) 0, 100% 11px, 100% 100%, 11px 100%, 0 calc(100% - 11px));
+}
+.holo::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--holo), transparent);
+  box-shadow: 0 0 8px var(--holo);
+  animation: holo-scan 5.5s ease-in-out infinite;
+  pointer-events: none;
+}
+.holo-h {
+  font-family: var(--font-display);
+  font-size: 16px;
+  letter-spacing: 2px;
+  color: var(--holo);
+  text-shadow: 0 0 8px var(--holo-text-shadow);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 9px;
+}
+.holo-l {
+  font-size: 12px;
+  letter-spacing: 2px;
+  color: var(--holo-dim);
+  text-transform: uppercase;
+}
+.holo-v {
+  font-family: var(--font-display);
+  color: var(--holo);
+  text-shadow: 0 0 6px var(--holo-v-shadow);
+}
+.holo-bar {
+  height: 5px;
+  background: var(--holo-bar-track);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.holo-bar > i {
+  display: block;
+  height: 100%;
+  background: var(--holo);
+  box-shadow: 0 0 6px var(--holo-bar-glow);
+  transition: width 0.6s ease;
+}
+.holo-btn {
+  background: var(--holo-btn-bg);
+  border: 0.5px solid var(--holo-tile-border);
+  border-radius: 3px;
+  color: var(--holo-btn-color);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: 1px;
+  padding: 6px 4px;
+  text-align: center;
+  cursor: pointer;
+  text-transform: uppercase;
+}
+.holo-btn:hover {
+  background: var(--holo-btn-hover-bg);
+  color: var(--holo);
+  box-shadow: 0 0 10px var(--holo-btn-hover-glow);
+}
+
+/* ── Laundry Bay animations ──────────────────────────────────────────────── */
+@keyframes drum-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+@keyframes drum-spin-slow {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+@keyframes water-ripple {
+  0%, 100% { transform: scaleX(1); opacity: 0.7; }
+  50%       { transform: scaleX(1.05); opacity: 1; }
+}
+@keyframes heat-pulse {
+  0%, 100% { opacity: 0.3; transform: translateY(0) scaleX(1); }
+  50%       { opacity: 0.9; transform: translateY(-4px) scaleX(1.1); }
+}
+@keyframes steam-rise {
+  0%   { transform: translateY(0) translateX(0); opacity: 0.8; }
+  100% { transform: translateY(-18px) translateX(3px); opacity: 0; }
+}
+@keyframes bubble-pop {
+  0%   { transform: translateY(0) scale(0.5); opacity: 0.9; }
+  100% { transform: translateY(-14px) scale(1); opacity: 0; }
+}
+@keyframes phase-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 4px currentColor; }
+  50%       { opacity: 0.6; box-shadow: 0 0 10px currentColor; }
+}
+@keyframes spin-dots {
+  0%   { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+@keyframes complete-glow {
+  0%, 100% { box-shadow: 0 0 6px #f5a62366; border-color: #f5a62366; }
+  50%       { box-shadow: 0 0 18px #f5a623cc; border-color: #f5a623; }
+}
+.laundry-complete {
+  animation: complete-glow 2s ease-in-out infinite;
+}
+
+/* ── Toast notifications ─────────────────────────────────────────────────── */
+@keyframes toast-slide-in {
+  from { opacity: 0; transform: translateX(40px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+.toast-enter {
+  animation: toast-slide-in 0.25s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+/* ── Prism theme: animated holographic rainbow ───────────────────────────
+   Motion is confined to decorative surfaces (header text, scan lines,
+   progress fills, tile sheen) so numeric values stay legible. All rules are
+   scoped to [data-theme="prism"]; no other theme is affected. */
+@keyframes prism-flow {
+  0%   { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+@keyframes prism-shift {
+  0%   { filter: hue-rotate(0deg); }
+  100% { filter: hue-rotate(360deg); }
+}
+
+/* Iridescent gradient text for display headers and panel labels. */
+[data-theme="prism"] .holo-h,
+[data-theme="prism"] .holo-v,
+[data-theme="prism"] .panel-label {
+  background: var(--prism-grad);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  animation: prism-flow 6s linear infinite;
+}
+/* Keep the muted/alert sub-labels distinct rather than gradient-filled. */
+[data-theme="prism"] .panel-label .muted {
+  -webkit-text-fill-color: var(--green-dim);
+}
+[data-theme="prism"] .panel-label .alert {
+  -webkit-text-fill-color: var(--crimson);
+}
+
+/* Rainbow scan line sweeping each holo tile. */
+[data-theme="prism"] .holo::before {
+  background: linear-gradient(90deg, transparent, #46f0ff, #a878ff, #ff3d9a, transparent);
+}
+
+/* Iridescent sheen drifting across each holo tile edge. */
+[data-theme="prism"] .holo::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 4px;
+  pointer-events: none;
+  background: linear-gradient(120deg, #46f0ff33, transparent 35%, transparent 65%, #ff3d9a33);
+  mix-blend-mode: screen;
+  animation: prism-shift 9s linear infinite;
+}
+
+/* Flowing rainbow progress fills. */
+[data-theme="prism"] .holo-bar > i {
+  background: var(--prism-grad);
+  background-size: 200% auto;
+  animation: prism-flow 4s linear infinite;
+}
+
+
+/* ── Open-on-exchange orbital dials ────────────────────────────────────
+   Each resting order renders as a small planet: a lit sphere with an
+   atmospheric halo, ringed by a tilted orbital track whose satellite
+   marks how close price is to the trigger. Motion is slow and purely
+   decorative — the numbers in the core never move. */
+@keyframes orbit-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+@keyframes orbit-breathe {
+  0%, 100% { opacity: 0.35; }
+  50%      { opacity: 0.75; }
+}
+@keyframes orbit-sweep {
+  0%   { transform: translateY(-120%); opacity: 0; }
+  20%  { opacity: 0.5; }
+  80%  { opacity: 0.5; }
+  100% { transform: translateY(120%); opacity: 0; }
+}
+.orbital { position: relative; }
+.orbital .orbit-track { animation: orbit-spin 24s linear infinite; transform-origin: 50% 50%; }
+.orbital .orbit-track.retro { animation-duration: 38s; animation-direction: reverse; }
+.orbital .orbit-halo { animation: orbit-breathe 4.5s ease-in-out infinite; }
+.orbital .orbit-scan { animation: orbit-sweep 5.5s linear infinite; }
+.orbital:hover .orbit-track { animation-duration: 8s; }
+@media (prefers-reduced-motion: reduce) {
+  .orbital .orbit-track, .orbital .orbit-halo, .orbital .orbit-scan { animation: none; }
+}

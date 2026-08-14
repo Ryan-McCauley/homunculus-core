@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-labelledby="tc dc">
+  <title id="tc">Homunculus</title>
+  <desc id="dc">A symmetric seven-digit hand reduced to a solid palm and bars, with an eye cut out of the palm.</desc>
+  <defs>
+    <mask id="hc-eye">
+      <rect width="64" height="64" fill="white" />
+      <path d="M23 45.5 Q32 39 41 45.5 Q32 52 23 45.5 Z" fill="black" />
+      <circle cx="32" cy="45.5" r="3.1" fill="white" />
+    </mask>
+  </defs>
+  <g mask="url(#hc-eye)">
+    <g fill="none" stroke="currentColor" stroke-width="4.2" stroke-linecap="round">
+      <path d="M21.5 40 V18" />
+      <path d="M26.75 40 V12" />
+      <path d="M32 40 V9" />
+      <path d="M37.25 40 V12" />
+      <path d="M42.5 40 V18" />
+      <path d="M19 45 C 13 44, 9 39, 7.5 31" />
+      <path d="M45 45 C 51 44, 55 39, 56.5 31" />
+    </g>
+    <rect x="18" y="36" width="28" height="19" rx="4" fill="currentColor" />
+  </g>
+</svg>

@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Homunculus">
+  <defs>
+    <mask id="fav-eye">
+      <rect width="64" height="64" fill="white" />
+      <path d="M23 45.5 Q32 39 41 45.5 Q32 52 23 45.5 Z" fill="black" />
+      <circle cx="32" cy="45.5" r="3.1" fill="white" />
+    </mask>
+  </defs>
+  <rect width="64" height="64" rx="12" fill="#03060a" />
+  <rect x="0.75" y="0.75" width="62.5" height="62.5" rx="11.25" fill="none" stroke="#00ff66" stroke-width="1.5" opacity="0.22" />
+  <g transform="translate(2.56 3.53) scale(0.92)">
+    <g mask="url(#fav-eye)">
+      <g fill="none" stroke="#00ff66" stroke-width="4.2" stroke-linecap="round">
+        <path d="M21.5 40 V18" />
+        <path d="M26.75 40 V12" />
+        <path d="M32 40 V9" />
+        <path d="M37.25 40 V12" />
+        <path d="M42.5 40 V18" />
+        <path d="M19 45 C 13 44, 9 39, 7.5 31" />
+        <path d="M45 45 C 51 44, 55 39, 56.5 31" />
+      </g>
+      <rect x="18" y="36" width="28" height="19" rx="4" fill="#00ff66" />
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,119 @@
+{
+  "name": "homunculus-core",
+  "version": "1.0.0",
+  "description": "A starship-bridge command interface for your home, computers, and data \u2014 powered by Claude.",
+  "author": "Ryan McCauley",
+  "license": "MIT",
+  "private": true,
+  "main": "out/main/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n server,app -c green,cyan \"npm:dev:server\" \"npm:dev:app\"",
+    "dev:server": "tsx watch server/index.ts",
+    "dev:app": "electron-vite dev",
+    "server": "tsx server/index.ts",
+    "start": "tsx server/index.ts",
+    "build": "electron-vite build",
+    "icons": "electron scripts/make-icons.cjs",
+    "build:web": "vite build --config vite.web.config.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run && npm run test:engine",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "rebuild": "electron-rebuild -f -w @homebridge/node-pty-prebuilt-multiarch",
+    "version": "git add CHANGELOG.md",
+    "release:patch": "npm version patch -m \"release: v%s\"",
+    "release:minor": "npm version minor -m \"release: v%s\"",
+    "release:major": "npm version major -m \"release: v%s\"",
+    "test:engine": "python3 -m unittest discover -t . -s engine",
+    "test:ts": "vitest run",
+    "fixtures:parity": "tsx engine/tools/gen-parity-fixture.ts",
+    "dist": "electron-vite build && electron-builder",
+    "dist:mac": "electron-vite build && electron-builder --mac"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.185",
+    "@homebridge/node-pty-prebuilt-multiarch": "^0.12.0",
+    "@tabler/icons-webfont": "^3.44.0",
+    "@types/topojson-client": "^3.1.5",
+    "dotenv": "^16.4.5",
+    "globe.gl": "^2.46.1",
+    "postgres": "^3.4.9",
+    "systeminformation": "^5.22.11",
+    "three": "^0.185.0",
+    "topojson-client": "^3.1.0",
+    "world-atlas": "^2.0.2",
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^3.6.0",
+    "@types/node": "^20.14.0",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@types/three": "^0.185.0",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^4.3.1",
+    "@vitest/coverage-v8": "^4.1.10",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
+    "concurrently": "^9.2.3",
+    "electron": "^31.0.0",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^2.3.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tsx": "^4.22.4",
+    "typescript": "^5.4.5",
+    "vite": "^5.3.1",
+    "vitest": "^4.1.10"
+  },
+  "build": {
+    "appId": "com.ryanmccauley.homunculus",
+    "productName": "Homunculus",
+    "copyright": "Copyright \u00a9 2026 Ryan McCauley",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "out/**/*",
+      "package.json",
+      "!node_modules/**/*"
+    ],
+    "extraMetadata": {
+      "main": "out/main/index.js"
+    },
+    "mac": {
+      "category": "public.app-category.utilities",
+      "icon": "build/icons/1024x1024.png",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "win": {
+      "icon": "build/icons/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "linux": {
+      "icon": "build/icons/1024x1024.png",
+      "category": "Utility",
+      "target": [
+        "AppImage"
+      ]
+    }
+  }
+}

@@ -1,0 +1,50 @@
+services:
+  homunculus:
+    build: .
+    container_name: homunculus
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    # All secrets/config come from .env (copy .env.example → .env first).
+    # env_file passes every key through; the block below documents the ones
+    # that matter most and supplies safe defaults where useful.
+    env_file:
+      - .env
+    environment:
+      # Required for the Computer Core (subscription auth). Generate with `claude setup-token`.
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN}
+      # Strongly recommended once reachable beyond localhost (Tailscale) — gates the WebSocket + REST.
+      HOMUNCULUS_TOKEN: ${HOMUNCULUS_TOKEN:-}
+      # Optional model override (sonnet | opus | haiku | full id).
+      HOMUNCULUS_MODEL: ${HOMUNCULUS_MODEL:-}
+    volumes:
+      # Persist all on-disk state (crypto trades/plans, OSINT
+      # cache, archive spool) across container rebuilds. Without these, every
+      # `docker compose up --build` wipes your data.
+      - homunculus-data:/app/data
+      - homunculus-private:/app/private
+    # NOTE: telemetry + the terminal reflect the CONTAINER, not the Windows host.
+    # On Docker Desktop for Windows the host is a WSL2 VM, so host pid/network
+    # scope is not directly available. Treat the terminal/vitals as the app's
+    # own environment; use Tailscale + the browser for the command-deck view.
+
+  # ── Optional: Postgres for the Data + Archive tabs (history capture) ──────
+  # Disabled by default. Enable with:  docker compose --profile history up -d
+  # Then set DATABASE_URL in .env to:
+  #   postgres://homunculus:homunculus@db:5432/homunculus
+  db:
+    image: postgres:16-alpine
+    container_name: homunculus-db
+    restart: unless-stopped
+    profiles: ["history"]
+    environment:
+      POSTGRES_USER: homunculus
+      POSTGRES_PASSWORD: homunculus
+      POSTGRES_DB: homunculus
+    volumes:
+      - homunculus-pg:/var/lib/postgresql/data
+
+volumes:
+  homunculus-data:
+  homunculus-private:
+  homunculus-pg:

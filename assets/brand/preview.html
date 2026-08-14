@@ -1,0 +1,146 @@
+<title>Homunculus — brand sheet</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Megrim&family=Share+Tech+Mono&display=swap" rel="stylesheet" />
+<style>
+  :root { --green:#00ff66; --soft:#9dffc4; --dim:#2f6b4a; --bg:#03060a; --line:#00ff661f; }
+  body { margin:0; background:var(--bg); color:var(--soft); font-family:'Share Tech Mono',ui-monospace,monospace; }
+  .wrap { max-width:940px; margin:0 auto; padding:46px 26px 90px; }
+  h1 { font-family:Megrim,Orbitron,sans-serif; font-size:34px; letter-spacing:7px; color:var(--green);
+       text-shadow:0 0 12px #00ff6655; margin:0 0 8px; font-weight:400; }
+  .sub { font-size:12.5px; letter-spacing:2px; color:var(--dim); margin:0 0 40px; }
+  h2 { font-size:11px; letter-spacing:3px; color:var(--dim); text-transform:uppercase; font-weight:400;
+       border-bottom:1px solid var(--line); padding-bottom:9px; margin:46px 0 22px; }
+  .row { display:flex; flex-wrap:wrap; gap:22px; align-items:flex-end; color:var(--green); }
+  .cell { display:flex; flex-direction:column; align-items:center; gap:10px; }
+  .cap { font-size:10px; letter-spacing:1.5px; color:var(--dim); }
+  .glow svg { filter:drop-shadow(0 0 6px #00ff6677); }
+  .tab { display:flex; align-items:center; gap:9px; background:#0d1117; border:1px solid #ffffff14;
+         border-radius:8px 8px 0 0; padding:9px 16px 9px 12px; width:210px; }
+  .tab span { font-family:system-ui,sans-serif; font-size:12px; color:#c9d1d9; letter-spacing:0; }
+  .sw { width:120px; }
+  .chip { height:54px; border-radius:5px; border:1px solid var(--line); }
+  .sw p { margin:7px 0 0; font-size:10.5px; letter-spacing:1px; color:var(--dim); line-height:1.5; }
+  .note { font-size:12.5px; line-height:1.75; color:#6f8a7c; max-width:62ch; margin:0 0 10px; }
+  .note b { color:var(--soft); font-weight:400; }
+  svg { display:block; }
+</style>
+<div class="wrap">
+<h1>HOMUNCULUS</h1>
+<p class="sub">phosphor green #00ff66 on bridge black #03060a</p>
+
+<h2>Primary mark — ringed anatomy</h2>
+<div class="row">
+  <div class="cell"><div class="glow" data-m="a" data-s="140"></div><span class="cap">140</span></div>
+  <div class="cell"><div class="glow" data-m="a" data-s="72"></div><span class="cap">72</span></div>
+  <div class="cell"><div class="glow" data-m="a" data-s="44"></div><span class="cap">44</span></div>
+</div>
+
+<h2>Lockup</h2>
+<div class="row"><div class="cell"><div class="glow" data-m="lock" data-s="330"></div></div></div>
+
+<h2>Solid cut — small sizes</h2>
+<div class="row">
+  <div class="cell"><div class="glow" data-m="c" data-s="72"></div><span class="cap">72</span></div>
+  <div class="cell"><div class="glow" data-m="c" data-s="40"></div><span class="cap">40</span></div>
+  <div class="cell"><div data-m="c" data-s="24"></div><span class="cap">24</span></div>
+  <div class="cell"><div data-m="c" data-s="16"></div><span class="cap">16</span></div>
+</div>
+
+<h2>App tile &amp; favicon</h2>
+<div class="row">
+  <div class="cell"><div data-m="tile" data-s="96"></div><span class="cap">tile 96</span></div>
+  <div class="cell"><div data-m="tile" data-s="56"></div><span class="cap">tile 56</span></div>
+  <div class="cell"><div data-m="fav" data-s="32"></div><span class="cap">favicon 32</span></div>
+  <div class="cell"><div data-m="fav" data-s="16"></div><span class="cap">favicon 16</span></div>
+  <div class="cell">
+    <div class="tab"><div data-m="fav" data-s="16"></div><span>Homunculus</span></div>
+    <span class="cap">in a tab</span>
+  </div>
+</div>
+
+<h2>Palette</h2>
+<div class="row">
+  <div class="sw"><div class="chip" style="background:#00ff66"></div><p>#00ff66<br>phosphor green — mark</p></div>
+  <div class="sw"><div class="chip" style="background:#9dffc4"></div><p>#9dffc4<br>soft green — subtitle</p></div>
+  <div class="sw"><div class="chip" style="background:#2f6b4a"></div><p>#2f6b4a<br>dim green — labels</p></div>
+  <div class="sw"><div class="chip" style="background:#03060a"></div><p>#03060a<br>bridge black — ground</p></div>
+  <div class="sw"><div class="chip" style="background:#e0245e"></div><p>#e0245e<br>crimson — alert only</p></div>
+</div>
+
+<h2>Usage</h2>
+<p class="note"><b>Above 40px</b> use the ringed mark. <b>16–40px</b> use the solid cut — the ring's
+hairlines and the finger joints do not survive below 40.</p>
+<p class="note"><b>Clear space</b> equals the radius of one fingertip node on all sides.
+Never place the ringed mark on a busy field; the outer hairline is 0.75 units and will vanish.</p>
+<p class="note"><b>The glow is CSS, not the file.</b> Assets ship flat; apply
+<code>filter: drop-shadow(0 0 6px #00ff6677)</code> at the usage site so it scales with context.</p>
+<p class="note"><b>mark.svg and mark-solid.svg use currentColor</b> — inline them and set
+<code>color</code>. tile.svg, lockup.svg and favicon.svg carry literal green for
+<code>&lt;img&gt;</code> use.</p>
+<p class="note"><b>Desktop icons are generated, not drawn.</b> <code>npm run icons</code> rasterises
+build/icons/ (8 PNGs + a 7-entry icon.ico) straight from tile.svg and favicon.svg using Electron's
+own Blink — no extra dependency. It applies the size rule automatically: 48px and under are cut from
+the solid hand, 64px and up from the ringed mark. Re-run it after changing either SVG.</p>
+<p class="note"><b>The wordmark is Megrim</b> (<code>--font-wordmark</code>), loaded from Google Fonts
+in index.html. It is live text, so lockup.svg only renders correctly where that font is available —
+inline in the app, yes; as an <code>&lt;img&gt;</code> in a README, no. Use the mark alone in those
+places. Megrim is hairline: never set it below 18px, and never use it for UI or running text —
+that stays Orbitron and Share Tech Mono.</p>
+</div>
+<script>
+const A = `<circle cx="32" cy="32" r="29.5" fill="none" stroke="currentColor" stroke-width="0.75" opacity="0.28"/>
+<circle cx="32" cy="32" r="26.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="38.22 3.4" stroke-dashoffset="19.1" opacity="0.6"/>
+<g stroke="currentColor" stroke-width="1" opacity="0.5"><path d="M32 59 V62.5"/><path d="M1.5 32 H5"/><path d="M59 32 H62.5"/></g>
+<g fill="currentColor" opacity="0.5"><circle cx="13.26" cy="13.26" r="1"/><circle cx="50.74" cy="13.26" r="1"/>
+<circle cx="13.26" cy="50.74" r="1"/><circle cx="50.74" cy="50.74" r="1"/></g>
+<path d="M21 37 L23 37.4 L27.5 35.8 L32 35.2 L36.5 35.8 L41 37.4 L43 37 L44 45 L39 51.5 L25 51.5 L20 45 Z" fill="currentColor" opacity="0.12"/>
+<g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+<path d="M23 37.4 L22.2 22.8 L20.38 8.18"/><path d="M27.5 35.8 L26.9 21 L26.04 6.18"/>
+<path d="M32 35.2 V5.5"/><path d="M36.5 35.8 L37.1 21 L37.96 6.18"/><path d="M41 37.4 L41.8 22.8 L43.62 8.18"/>
+<path d="M21 37 L20 45 L25 51.5 L39 51.5 L44 45 L43 37"/>
+<path d="M21 37 L23 37.4 L27.5 35.8 L32 35.2 L36.5 35.8 L41 37.4 L43 37"/></g>
+<g fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+<path d="M20.4 43 C 15.5 42.2, 10.2 36.5, 6.53 24.7"/><path d="M43.6 43 C 48.5 42.2, 53.8 36.5, 57.47 24.7"/></g>
+<path d="M22 38 L21.2 44.7 L25.6 50.3 L38.4 50.3 L42.8 44.7 L42 38" fill="none" stroke="currentColor" stroke-width="0.75" opacity="0.35"/>
+<g fill="currentColor" opacity="0.75"><circle cx="23" cy="37.4" r="1.5"/><circle cx="27.5" cy="35.8" r="1.5"/>
+<circle cx="32" cy="35.2" r="1.5"/><circle cx="36.5" cy="35.8" r="1.5"/><circle cx="41" cy="37.4" r="1.5"/>
+<circle cx="22.2" cy="22.8" r="1.5"/><circle cx="26.9" cy="21" r="1.5"/><circle cx="32" cy="20.5" r="1.5"/>
+<circle cx="37.1" cy="21" r="1.5"/><circle cx="41.8" cy="22.8" r="1.5"/>
+<circle cx="13" cy="38" r="1.5"/><circle cx="51" cy="38" r="1.5"/></g>
+<g fill="currentColor"><circle cx="20.38" cy="8.18" r="2.3"/><circle cx="26.04" cy="6.18" r="2.3"/>
+<circle cx="32" cy="5.5" r="2.3"/><circle cx="37.96" cy="6.18" r="2.3"/><circle cx="43.62" cy="8.18" r="2.3"/>
+<circle cx="6.53" cy="24.7" r="2.3"/><circle cx="57.47" cy="24.7" r="2.3"/></g>
+<g fill="none" stroke="currentColor" stroke-width="0.75" opacity="0.45">
+<circle cx="32" cy="5.5" r="3.8"/><circle cx="6.53" cy="24.7" r="3.8"/><circle cx="57.47" cy="24.7" r="3.8"/></g>
+<path d="M24.8 44.3 Q32 38.9 39.2 44.3 Q32 49.7 24.8 44.3 Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+<circle cx="32" cy="44.3" r="3" fill="none" stroke="currentColor" stroke-width="1.1" opacity="0.85"/>
+<circle cx="32" cy="44.3" r="1.5" fill="currentColor"/>
+<g stroke="currentColor" stroke-width="0.8" stroke-linecap="round" opacity="0.6">
+<path d="M32 40.3 V38.7"/><path d="M32 49.9 V48.3"/><path d="M27.2 41.5 L26.1 40.7"/>
+<path d="M36.8 41.5 L37.9 40.7"/><path d="M27.2 47.1 L26.1 47.9"/><path d="M36.8 47.1 L37.9 47.9"/></g>`;
+const C = `<defs><mask id="MID"><rect width="64" height="64" fill="white"/>
+<path d="M23 45.5 Q32 39 41 45.5 Q32 52 23 45.5 Z" fill="black"/>
+<circle cx="32" cy="45.5" r="3.1" fill="white"/></mask></defs>
+<g mask="url(#MID)"><g fill="none" stroke="currentColor" stroke-width="4.2" stroke-linecap="round">
+<path d="M21.5 40 V18"/><path d="M26.75 40 V12"/><path d="M32 40 V9"/><path d="M37.25 40 V12"/>
+<path d="M42.5 40 V18"/><path d="M19 45 C 13 44, 9 39, 7.5 31"/><path d="M45 45 C 51 44, 55 39, 56.5 31"/></g>
+<rect x="18" y="36" width="28" height="19" rx="4" fill="currentColor"/></g>`;
+const TILEBG = `<rect width="64" height="64" rx="12" fill="#03060a"/>
+<rect x="0.75" y="0.75" width="62.5" height="62.5" rx="11.25" fill="none" stroke="#00ff66" stroke-width="1.5" opacity="0.22"/>`;
+const MK = {
+  a:    s => `<svg width="${s}" height="${s}" viewBox="0 0 64 64">${A}</svg>`,
+  c:    s => `<svg width="${s}" height="${s}" viewBox="0 0 64 64">${C}</svg>`,
+  tile: s => `<svg width="${s}" height="${s}" viewBox="0 0 64 64">${TILEBG}<g transform="translate(5.76 5.76) scale(0.82)" color="#00ff66">${A}</g></svg>`,
+  fav:  s => `<svg width="${s}" height="${s}" viewBox="0 0 64 64">${TILEBG}<g transform="translate(2.56 3.53) scale(0.92)" color="#00ff66">${C}</g></svg>`,
+  lock: s => `<svg width="${s}" height="${s*76/314}" viewBox="0 0 314 76">
+<g transform="translate(8 8) scale(0.9375)" color="#00ff66">${A}</g>
+<path d="M86 18 V58" stroke="#00ff66" stroke-width="1.5" opacity="0.25"/>
+<text class="wm" x="104" y="42" fill="#00ff66" font-family="Megrim, Orbitron, sans-serif" font-size="27" letter-spacing="3.4">HOMUNCULUS</text>
+<text x="105" y="56.5" fill="#9dffc4" font-family="'Share Tech Mono', ui-monospace, monospace" font-size="8.5" letter-spacing="2.6" opacity="0.7">BRIDGE COMMAND INTERFACE</text></svg>`
+};
+let uid = 0;
+document.querySelectorAll('[data-m]').forEach(el => {
+  el.innerHTML = MK[el.dataset.m](+el.dataset.s).replace(/MID/g, 'k' + (uid++));
+});
+</script>
