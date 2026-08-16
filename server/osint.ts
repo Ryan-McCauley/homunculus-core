@@ -427,8 +427,11 @@ class OsintHub {
       const prev = this.pizza
       const snap = normalizePizza(raw)
       this.pizza = snap
+      // Dedup on the UPSTREAM timestamp, not snap.ts — snap.ts is Date.now() at
+      // poll time, so it differs on every poll and the guard never fired: the
+      // history filled with duplicate points whenever the feed had not moved.
       const last = this.pizzaHistory[this.pizzaHistory.length - 1]
-      if (!last || last.ts !== snap.ts) {
+      if (!last || !prev || prev.sourceTime !== snap.sourceTime) {
         this.pizzaHistory.push({ ts: snap.ts, indexScore: snap.indexScore, anomalyCount: snap.anomalyCount, defcon: snap.defcon })
         if (this.pizzaHistory.length > PIZZA_HISTORY_MAX) this.pizzaHistory.shift()
       }

@@ -29,7 +29,7 @@
     "test:ts": "vitest run",
     "fixtures:parity": "tsx engine/tools/gen-parity-fixture.ts",
     "dist": "electron-vite build && electron-builder",
-    "dist:mac": "electron-vite build && electron-builder --mac"
+    "dist:mac": "electron-vite build && electron-builder --mac ${NOTARIZE:+-c.mac.notarize=true}"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.185",
@@ -95,7 +95,11 @@
           ]
         }
       ],
-      "artifactName": "${productName}-${version}-${arch}.${ext}"
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
+      "hardenedRuntime": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "notarize": false
     },
     "win": {
       "icon": "build/icons/icon.ico",

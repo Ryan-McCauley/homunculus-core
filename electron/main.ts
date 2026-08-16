@@ -23,6 +23,48 @@ function windowIcon(): { icon: string } | Record<string, never> {
   return existsSync(ICON_PATH) ? { icon: ICON_PATH } : {}
 }
 
+// ── Waiting-for-backend page ────────────────────────────────────────────
+// Inlined as a data: URL rather than shipped as a file. It has to render when
+// the thing that serves every other asset is by definition unreachable, so it
+// can depend on nothing — no stylesheet, no font, no image, no bundled path
+// that a packaging change could drop.
+const RETRY_MS = 3000
+
+function waitingPage(): string {
+  const target = DEV_URL || PROD_URL
+  const html = `<!doctype html><meta charset="utf-8"><title>Homunculus</title>
+<style>
+  html,body{margin:0;height:100%;background:#03060a;color:#7fd4ff;
+    font:14px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace}
+  main{height:100%;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;gap:18px;text-align:center;padding:32px}
+  h1{margin:0;font-size:15px;letter-spacing:.22em;color:#e8f6ff;font-weight:600}
+  p{margin:0;max-width:56ch;color:#5d8ba6}
+  code{background:#0a1620;border:1px solid #14324a;border-radius:4px;
+    padding:2px 7px;color:#7fd4ff;white-space:nowrap}
+  .dot{width:7px;height:7px;border-radius:50%;background:#7fd4ff;
+    animation:p 1.4s ease-in-out infinite}
+  @keyframes p{0%,100%{opacity:.25}50%{opacity:1}}
+</style>
+<main>
+  <div class="dot"></div>
+  <h1>NO BACKEND AT ${escapeHtml(target)}</h1>
+  <p>Homunculus is a thin desktop client — the backend does the work. Start it
+     with <code>npm run start</code> or <code>docker compose up</code>, and this
+     window will connect on its own.</p>
+  <p>Pointing at a backend on another machine? Launch with
+     <code>HOMUNCULUS_URL=http://host:8787</code>.</p>
+  <p>Retrying every ${RETRY_MS / 1000}s…</p>
+</main>`
+  return 'data:text/html;charset=utf-8,' + encodeURIComponent(html)
+}
+
+const escapeHtml = (s: string): string =>
+  s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`)
+
+/** Pending reconnect attempt, cleared on window close so it cannot outlive it. */
+let retryTimer: NodeJS.Timeout | null = null
+
 // Where to load the UI from. In dev, electron-vite serves the renderer; in
 // production the backend serves it (override with HOMUNCULUS_URL for a remote
 // backend, e.g. a Docker host on your Tailscale network).
@@ -127,6 +169,21 @@ function createWindow(): void {
   mainWindow.on('ready-to-show', () => mainWindow?.show())
   mainWindow.on('closed', () => {
     mainWindow = null
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null }
+  })
+
+  // The shell is a client, not a server: with no backend up, loadURL fails and
+  // Chromium's own ERR_CONNECTION_REFUSED page is all the user sees — which
+  // reads as "the app is broken" rather than "start the backend". Show what to
+  // do instead, and keep retrying so the real UI appears the moment it is up.
+  mainWindow.webContents.on('did-fail-load', (_e, _code, _desc, _url, isMainFrame) => {
+    if (!isMainFrame || !mainWindow) return
+    void mainWindow.loadURL(waitingPage())
+    if (retryTimer) clearTimeout(retryTimer)
+    retryTimer = setTimeout(() => {
+      retryTimer = null
+      mainWindow?.loadURL(DEV_URL || PROD_URL).catch(() => {})
+    }, RETRY_MS)
   })
 
   // target="_blank" links (e.g. the BRIDGE tab's Home Assistant link) open in the

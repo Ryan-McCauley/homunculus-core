@@ -91,6 +91,57 @@ CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-... HOMUNCULUS_TOKEN=yoursecret \
 By default telemetry/terminal reflect the **container**. To monitor/shell the host,
 see the commented host-scope options in `docker-compose.yml`.
 
+## Desktop app (packaged)
+
+> **The desktop app is a client, not the whole thing.** It is a window onto the
+> backend — it does not contain or start one. Install the app *and* run a
+> backend, or you will get a "no backend" screen instead of the bridge.
+
+Build installers from source with `npm run dist` (or `npm run dist:mac`); they
+land in `dist/`. Targets are dmg (macOS), NSIS (Windows) and AppImage (Linux).
+
+Then:
+
+1. **Start a backend** — `npm run start` from a checkout, or `docker compose up`.
+2. **Launch the app.** It looks for `http://localhost:8787`. If nothing is
+   there it shows a waiting screen and keeps retrying, connecting by itself as
+   soon as the backend is up.
+
+To point the app at a backend on another machine, set `HOMUNCULUS_URL`:
+
+```bash
+HOMUNCULUS_URL=http://your-host:8787 open -a Homunculus
+```
+
+Note that the OS-keychain vault is deliberately disabled against a remote
+backend — pushing keys to another host would put them on the wire — so enter
+credentials on the machine running the backend.
+
+### macOS: "Homunculus is damaged" / "unidentified developer"
+
+Builds from this repo are **not notarized**, so Gatekeeper blocks them after a
+download. That warning is about the absent Apple signature, not the contents.
+Clear the quarantine flag after installing:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Homunculus.app
+```
+
+To produce notarized builds yourself you need a paid Apple Developer account and
+a **Developer ID Application** certificate (an "Apple Development" certificate
+is not enough — it only covers your own registered machines). With one
+installed, export the three variables below and build with `NOTARIZE=1`:
+
+```bash
+export APPLE_ID="you@example.com"
+export APPLE_APP_SPECIFIC_PASSWORD="abcd-efgh-ijkl-mnop"   # appleid.apple.com
+export APPLE_TEAM_ID="XXXXXXXXXX"
+NOTARIZE=1 npm run dist:mac
+```
+
+Hardened runtime and entitlements (`build/entitlements.mac.plist`) are already
+configured; `NOTARIZE=1` is what turns on the signing-and-stapling step.
+
 ## Layout
 
 ```
