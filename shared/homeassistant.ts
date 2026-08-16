@@ -29,6 +29,28 @@ export interface HaEntity {
   lastChanged: string | null // ISO timestamp from HA's top-level last_changed field
 }
 
+/** One Home Assistant area — a room, as HA's own area registry knows it. */
+export interface HaArea {
+  id: string // HA area_id, e.g. 'living_room'
+  name: string // 'Living Room'
+}
+
+/**
+ * The area registry plus the entity→area assignment.
+ *
+ * The REST API this hub otherwise polls cannot see areas at all: /api/states
+ * returns states and attributes, and area membership lives in the registries,
+ * which are websocket-only. So this is fetched separately (see fetchAreaRegistry
+ * in server/homeassistant.ts) and is null whenever that fetch has not succeeded —
+ * in which case every entity is simply "unassigned" rather than the SECTORS view
+ * inventing a grouping it cannot actually know.
+ */
+export interface HaAreaRegistry {
+  areas: HaArea[]
+  /** entityId → area id. Entities absent from this map have no area. */
+  entityAreas: Record<string, string>
+}
+
 /** Entities grouped under a logical device. */
 export interface HaDevice {
   key: string // 'voltaire' | 'r2peepoo' | 'washer' | ...
@@ -44,6 +66,9 @@ export interface HaSnapshot {
   climate: HaClimateState[]
   entities: HaEntity[]
   devices: HaDevice[]
+  /** Area registry, when it could be fetched. Null means "areas unknown", which
+   *  the SECTORS view renders as a single unassigned sector. */
+  areas?: HaAreaRegistry | null
   /** True when this is the last good reading being held through a transient poll
    *  failure rather than a fresh one. `connected` stays true — the house has not
    *  gone away because one request timed out — but consumers that care about

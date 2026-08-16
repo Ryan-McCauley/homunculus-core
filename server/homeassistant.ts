@@ -4,7 +4,8 @@
 // generic entities (flat + grouped by device) so new panels can pull what they
 // need. Commands are generic: any domain.service with arbitrary data.
 
-import type { HaClimateState, HaEntity, HaDevice, HaSnapshot } from '../shared/homeassistant'
+import type { HaAreaRegistry, HaClimateState, HaEntity, HaDevice, HaSnapshot } from '../shared/homeassistant'
+import { fetchAreaRegistry } from './haAreaRegistry'
 
 const HA_URL = (process.env['HA_URL'] || '').replace(/\/$/, '')
 const HA_TOKEN = process.env['HA_TOKEN'] || ''
@@ -14,10 +15,18 @@ const HEADERS = { Authorization: `Bearer ${HA_TOKEN}`, 'Content-Type': 'applicat
 
 // Domains worth shipping to the UI. Skips chatty/irrelevant ones (tts,
 // conversation, zone, persistent_notification, …) to keep the snapshot lean.
-const RELEVANT_DOMAINS = new Set([
+//
+// The controllable domains here are load-bearing rather than a nicety: the HOME
+// tab's SECTORS and REGISTRY views, and the action manifest an agent plans
+// against, can only ever act on what survives this filter. A domain dropped here
+// is a domain that does not exist as far as the tab is concerned — so anything
+// shared/agentManifest.ts knows how to command must appear in this set.
+export const RELEVANT_DOMAINS = new Set([
   'climate', 'sensor', 'binary_sensor', 'switch', 'lock', 'cover', 'select',
   'number', 'button', 'vacuum', 'media_player', 'weather', 'device_tracker',
-  'update', 'person', 'sun', 'todo'
+  'update', 'person', 'sun', 'todo',
+  'light', 'scene', 'script', 'automation', 'fan', 'input_boolean',
+  'alarm_control_panel', 'camera', 'humidifier', 'water_heater'
 ])
 
 // Logical device grouping by id/name substring. Order matters — first match wins.
@@ -42,6 +51,39 @@ const HA_FAILURES_BEFORE_OFFLINE = 3
 /** The configured unit never changes while HA is running, so it is fetched once and
  *  cached rather than re-requested on every poll. */
 let cachedTempUnit: '°F' | '°C' | null = null
+
+/** How often the area registry is re-read. Areas change when someone reorganizes
+ *  their house, so this is deliberately far slower than the state poll. */
+const AREA_REFRESH_MS = 60 * 60 * 1000
+
+/** Last successful area registry, or null while unknown. Held across poll
+ *  failures — a timed-out state poll says nothing about where the rooms are. */
+let cachedAreas: HaAreaRegistry | null = null
+let areasFetchedAt = 0
+let areaFetchInFlight = false
+
+/**
+ * Refreshes the area registry in the background when it is stale.
+ *
+ * Deliberately not awaited by the poll: the websocket round trip is slower than a
+ * state fetch, and a snapshot without areas is far better than a snapshot that is
+ * late. The first few polls may carry `areas: null`, and the UI renders that as
+ * "areas unknown" until this lands.
+ */
+function refreshAreasIfStale(): void {
+  if (areaFetchInFlight) return
+  if (cachedAreas && Date.now() - areasFetchedAt < AREA_REFRESH_MS) return
+  areaFetchInFlight = true
+  void fetchAreaRegistry(HA_URL, HA_TOKEN, HA_REQUEST_TIMEOUT_MS)
+    .then((registry) => {
+      if (registry) {
+        cachedAreas = registry
+        areasFetchedAt = Date.now()
+      }
+    })
+    .catch(() => { /* areas stay unknown; the UI says so */ })
+    .finally(() => { areaFetchInFlight = false })
+}
 
 async function fetchTempUnit(): Promise<'°F' | '°C'> {
   if (cachedTempUnit) return cachedTempUnit
@@ -112,7 +154,13 @@ async function fetchSnapshot(): Promise<Omit<HaSnapshot, 'ts' | 'connected'>> {
     .filter((e) => RELEVANT_DOMAINS.has((e['entity_id'] as string).split('.')[0]))
     .map(parseEntity)
 
-  return { url: HA_URL || null, tempUnit, climate, entities, devices: groupDevices(entities) }
+  refreshAreasIfStale()
+
+  return {
+    url: HA_URL || null, tempUnit, climate, entities,
+    devices: groupDevices(entities),
+    areas: cachedAreas,
+  }
 }
 
 type Listener = (snapshot: HaSnapshot) => void
@@ -124,7 +172,8 @@ const EMPTY = (): HaSnapshot => ({
   tempUnit: '°F',
   climate: [],
   entities: [],
-  devices: []
+  devices: [],
+  areas: null
 })
 
 class HomeAssistantHub {

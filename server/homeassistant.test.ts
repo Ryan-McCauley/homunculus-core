@@ -257,3 +257,21 @@ describe('sendCommand', () => {
     await expect(m.haHub.sendCommand('light.kitchen', 'light.turn_on', {})).rejects.toThrow('404')
   })
 })
+
+describe('RELEVANT_DOMAINS', () => {
+  it('carries the controllable domains the HOME tab exposes', async () => {
+    const m = await freshModule()
+    // The tab claims to expose all of Home Assistant, so the domains its views
+    // and the agent manifest act on must actually survive the snapshot filter.
+    for (const domain of ['light', 'scene', 'script', 'automation', 'fan', 'switch', 'lock', 'cover', 'climate']) {
+      expect(m.RELEVANT_DOMAINS.has(domain), domain).toBe(true)
+    }
+  })
+
+  it('still skips chatty domains that no view renders', async () => {
+    const m = await freshModule()
+    for (const domain of ['tts', 'conversation', 'persistent_notification']) {
+      expect(m.RELEVANT_DOMAINS.has(domain), domain).toBe(false)
+    }
+  })
+})

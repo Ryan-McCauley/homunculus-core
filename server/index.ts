@@ -12,6 +12,15 @@ import { ChatSession, chatStatus, addProactiveListener, proactiveMonitor, broadc
 import { TerminalManager } from './terminal'
 import { haHub } from './homeassistant'
 import { executeRoutine, ROUTINES } from './routines'
+import { compileIntent, compileOps, executePlan, type RawOp } from './agentIntent'
+// Aliased: server/sync.ts already exports a buildManifest (the file manifest a
+// peer node diffs against), and these two are unrelated.
+import { buildManifest as buildAgentManifest } from '../shared/agentManifest'
+import {
+  abortFlow, deleteEntry, fetchDiscoveredFlows, getFlow, listEntries, listHandlers,
+  reloadEntry, startFlow, submitStep,
+} from './haConfigFlow'
+import { normalizeFields, redactValues } from '../shared/haConfigFlow'
 import { historyHub } from './history'
 import { osintHub } from './osint'
 import { archiveHub } from './archive'
@@ -474,6 +483,152 @@ async function handleApi(
     if (!requireToken(req, res)) return true
     const list = Object.entries(ROUTINES).map(([key, r]) => ({ key, label: r.label, description: r.description }))
     return json(200, list), true
+  }
+
+  // ── Devices: adding and removing Home Assistant integrations ────────────
+  //
+  // OPERATOR ONLY, BY CONSTRUCTION. None of this is reachable from the agent
+  // uplink: /api/agent/intent executes manifest actions, a manifest action is an
+  // HA *service* call, and a config flow is not a service — it is a different API
+  // that these routes are the only path to. That separation is deliberate.
+  // Adding an integration means typing credentials and granting a new piece of
+  // software access to the house, which is a decision for the person, not for
+  // something compiling intent out of free text.
+
+  // GET /api/ha/integrations  — every integration domain that can be set up
+  if (path === '/api/ha/integrations' && req.method === 'GET') {
+    if (!requireToken(req, res)) return true
+    try {
+      return json(200, { ok: true, handlers: await listHandlers() }), true
+    } catch (err) {
+      return json(502, { ok: false, error: (err as Error).message }), true
+    }
+  }
+
+  // GET /api/ha/entries  — integrations already configured
+  if (path === '/api/ha/entries' && req.method === 'GET') {
+    if (!requireToken(req, res)) return true
+    try {
+      return json(200, { ok: true, entries: await listEntries() }), true
+    } catch (err) {
+      return json(502, { ok: false, error: (err as Error).message }), true
+    }
+  }
+
+  // GET /api/ha/discovered  — devices HA found on the network but nobody has set
+  // up yet. Websocket-only upstream, and empty rather than fatal when unavailable.
+  if (path === '/api/ha/discovered' && req.method === 'GET') {
+    if (!requireToken(req, res)) return true
+    return json(200, { ok: true, flows: await fetchDiscoveredFlows() }), true
+  }
+
+  // POST /api/ha/flow  — begin adding an integration
+  if (path === '/api/ha/flow' && req.method === 'POST') {
+    if (!requireToken(req, res)) return true
+    const body = await readBody(req)
+    const handler = typeof body['handler'] === 'string' ? body['handler'] : ''
+    if (!handler) return json(400, { ok: false, error: 'body.handler required' }), true
+    const outcome = await startFlow(handler)
+    auditLog.note({
+      action: 'ha.config_flow.start',
+      resource: `integration:${handler}`,
+      summary: `started a config flow for ${handler}`,
+    })
+    return json(200, outcome), true
+  }
+
+  // GET|POST|DELETE /api/ha/flow/:flowId  — read, advance, or cancel a flow
+  if (path.startsWith('/api/ha/flow/')) {
+    if (!requireToken(req, res)) return true
+    const flowId = path.slice('/api/ha/flow/'.length)
+
+    if (req.method === 'GET') return json(200, await getFlow(flowId)), true
+
+    if (req.method === 'DELETE') {
+      auditLog.note({ action: 'ha.config_flow.abort', resource: `flow:${flowId}`, summary: 'aborted a config flow' })
+      return json(200, await abortFlow(flowId)), true
+    }
+
+    if (req.method === 'POST') {
+      const body = await readBody(req)
+      const values = (body['values'] ?? {}) as Record<string, unknown>
+
+      // The audit entry is written from a REDACTED copy, and the redaction needs
+      // the step's own schema to know which fields are credentials — so the
+      // current step is read back first. If that read fails we pass no schema,
+      // and redactValues fails closed and masks everything. This log is
+      // append-only and never rewritten: a password written here is written
+      // permanently, so the safe direction is the only acceptable one.
+      const current = await getFlow(flowId)
+      const fields = current.ok ? normalizeFields(current.step.data_schema as never) : []
+      auditLog.note({
+        action: 'ha.config_flow.step',
+        resource: `flow:${flowId}`,
+        summary: `submitted step ${current.ok ? current.step.step_id ?? '?' : '?'} of a config flow`,
+        meta: { handler: current.ok ? current.step.handler : undefined, values: redactValues(values, fields) },
+      })
+
+      return json(200, await submitStep(flowId, values)), true
+    }
+  }
+
+  // DELETE /api/ha/entries/:entryId  — remove an integration entirely
+  if (path.startsWith('/api/ha/entries/') && req.method === 'DELETE') {
+    if (!requireToken(req, res)) return true
+    const entryId = path.slice('/api/ha/entries/'.length)
+    const result = await deleteEntry(entryId)
+    auditLog.note({
+      action: 'ha.config_entry.delete',
+      resource: `entry:${entryId}`,
+      summary: `removed config entry ${entryId}`,
+      meta: { ok: result.ok },
+    })
+    return json(result.ok ? 200 : 400, result), true
+  }
+
+  // POST /api/ha/entries/:entryId/reload  — reload an integration in place
+  if (path.startsWith('/api/ha/entries/') && path.endsWith('/reload') && req.method === 'POST') {
+    if (!requireToken(req, res)) return true
+    const entryId = path.slice('/api/ha/entries/'.length, -'/reload'.length)
+    return json(200, await reloadEntry(entryId)), true
+  }
+
+  // GET /api/agent/manifest  — the HOME tab's action contract, derived from the
+  // live entity list. An agent reads this instead of inferring what it can do
+  // from the rendered page: every route, every action id, its payload schema,
+  // and the guardrail tier that decides whether it may act alone.
+  if (path === '/api/agent/manifest' && req.method === 'GET') {
+    if (!requireToken(req, res)) return true
+    return json(200, { ok: true, ...buildAgentManifest(haHub.getLatest()?.entities ?? []) }), true
+  }
+
+  // POST /api/agent/intent  — the uplink. Takes { text } or { ops }, compiles a
+  // plan, and executes it unless dry_run. The ⌘K palette and an autonomous agent
+  // both come through here, so there is one validator and one audit trail
+  // regardless of who asked.
+  //
+  // Confirm-tier ops never execute on this call's say-so: `confirm` lists op
+  // NUMBERS a human approved, and anything confirm-tier without its number in
+  // that list comes back `held` for the operator to release.
+  if (path === '/api/agent/intent' && req.method === 'POST') {
+    if (!requireToken(req, res)) return true
+    const body = await readBody(req)
+    const entities = haHub.getLatest()?.entities ?? []
+    const manifest = buildAgentManifest(entities)
+
+    const rawOps = Array.isArray(body['ops']) ? body['ops'] as RawOp[] : null
+    const text = typeof body['text'] === 'string' ? body['text'] : ''
+    if (!rawOps && !text.trim()) {
+      return json(400, { ok: false, error: 'body.text or body.ops required' }), true
+    }
+
+    const plan = rawOps ? compileOps(rawOps, manifest) : compileIntent(text, manifest, entities)
+    const confirmed = Array.isArray(body['confirm'])
+      ? (body['confirm'] as unknown[]).filter((n): n is number => typeof n === 'number')
+      : []
+    const dryRun = body['dry_run'] === true
+    const result = await executePlan(plan, manifest, { confirmed, dryRun, actor: currentActor() })
+    return json(200, { ok: result.ok, plan, result }), true
   }
 
   // GET /api/history/telemetry?metric=cpu_load&from=<ms>&to=<ms>&limit=500
