@@ -101,7 +101,12 @@ Useful commands:
 
 Notes:
 - **No port-forwarding, no public exposure.** Tailscale is a private mesh; only
-  your own devices can reach the PC.
+  your own devices can reach the PC *over the tailnet*. Note this is about the
+  internet, not your LAN: if you change the compose port mapping from the default
+  `127.0.0.1:8787:8787` to a bare `8787:8787`, the port is published on every
+  interface and anything on your home Wi-Fi can reach it. Set `HOMUNCULUS_TOKEN`
+  before you do that — without one the server refuses remote requests outright,
+  which is the safe failure but also a broken phone view.
 - **Apple Watch** has no general browser. Realistic options: a phone-side
   shortcut/complication that opens the URL, or a later dedicated watch surface.
   Tell me what you want the watch to *show* and we'll design for it.
@@ -172,9 +177,11 @@ docker run --rm -v homunculus-data:/data -v ${PWD}:/backup alpine `
 # set DATABASE_URL in .env to the bundled DB, then:
 .\scripts\homunculus.ps1 up -History
 ```
-Set in `.env`:
+Set both in `.env` — compose will not start the database without a password, and
+there is no default:
 ```
-DATABASE_URL=postgres://homunculus:homunculus@db:5432/homunculus
+POSTGRES_PASSWORD=choose-something-long
+DATABASE_URL=postgres://homunculus:choose-something-long@db:5432/homunculus
 ```
 
 ---

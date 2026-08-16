@@ -44,4 +44,9 @@ export interface HaSnapshot {
   climate: HaClimateState[]
   entities: HaEntity[]
   devices: HaDevice[]
+  /** True when this is the last good reading being held through a transient poll
+   *  failure rather than a fresh one. `connected` stays true — the house has not
+   *  gone away because one request timed out — but consumers that care about
+   *  freshness (and the UI) can tell the difference. */
+  stale?: boolean
 }

@@ -12,8 +12,21 @@ function apiBase(): string {
   return location.origin
 }
 
+// The /api/history/* routes are token-gated for non-localhost callers (same as
+// the finance/crypto routes), so a remote surface — the tailnet phone/browser
+// view — must present the token or the DATA dashboard 401s. Sent as a header
+// rather than a query param: the value never lands in a URL, server log, or the
+// browser history the way ?token= does. Mirrors the token resolution the other
+// lib/*Api.ts helpers use; localhost (no token configured) sends nothing and is
+// waived server-side.
+function token(): string {
+  const q = new URLSearchParams(location.search)
+  return q.get('token') || (window as any).__HOMUNCULUS_TOKEN__ || ''
+}
+
 async function getJson<T>(path: string): Promise<T> {
-  const res = await fetch(`${apiBase()}${path}`)
+  const t = token()
+  const res = await fetch(`${apiBase()}${path}`, t ? { headers: { 'x-homunculus-token': t } } : undefined)
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
   return res.json() as Promise<T>
 }

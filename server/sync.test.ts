@@ -261,15 +261,22 @@ function fakePeer(files: Record<string, { body: string; mtime: number }>) {
 describe('runSync', () => {
   const PEER = { id: 'desk', label: 'desk-pc', url: 'http://desk-pc:8787', token: 't' }
 
+  // Sentinel mtimes below stay under 2^32 seconds (~year 2106). write() round-trips
+  // a given ms through utimesSync, and on Windows a value past that wraps silently
+  // instead of erroring — e.g. 9_000_000_000_000 ms (~year 2255) came back out of a
+  // real stat() as 410_065_408_000, which read as OLDER than the peer's honest
+  // (mock, not filesystem-backed) mtime and made this test pull a file it should
+  // have pushed. 1_700_000_000_000 elsewhere in this file (~year 2023) has always
+  // been safe; these just needed to be brought under the same ceiling.
   it('pulls what the peer has newer and pushes what we have newer, in one run', async () => {
-    write('layout.json', 'LOCAL-NEW', 9_000_000_000_000)
+    write('layout.json', 'LOCAL-NEW', 2_100_000_000_000)
     write('crypto/trades.json', 'LOCAL-OLD', 1_000_000_000_000)
     sync = await loadModule({ areas: ['layout', 'crypto'], peers: [PEER], tokens: { desk: 't' } })
 
     const peer = fakePeer({
       'layout.json': { body: 'PEER-OLD', mtime: 1_000_000_000_000 },
-      'crypto/trades.json': { body: 'PEER-NEW', mtime: 9_000_000_000_000 },
-      'crypto/cost-basis.json': { body: 'ONLY-ON-PEER', mtime: 5_000_000_000_000 }
+      'crypto/trades.json': { body: 'PEER-NEW', mtime: 2_100_000_000_000 },
+      'crypto/cost-basis.json': { body: 'ONLY-ON-PEER', mtime: 1_900_000_000_000 }
     })
     vi.stubGlobal('fetch', peer.fetchStub)
 
@@ -287,7 +294,7 @@ describe('runSync', () => {
   })
 
   it('converges — a second run straight after transfers nothing', async () => {
-    write('layout.json', 'LOCAL-NEW', 9_000_000_000_000)
+    write('layout.json', 'LOCAL-NEW', 2_100_000_000_000)
     sync = await loadModule({ areas: ['layout'], peers: [PEER], tokens: { desk: 't' } })
     const peer = fakePeer({ 'layout.json': { body: 'PEER-OLD', mtime: 1_000_000_000_000 } })
     vi.stubGlobal('fetch', peer.fetchStub)
@@ -301,7 +308,7 @@ describe('runSync', () => {
   })
 
   it('deletes nothing — a file only this node has is pushed, not removed', async () => {
-    write('layout.json', 'ONLY-LOCAL', 5_000_000_000_000)
+    write('layout.json', 'ONLY-LOCAL', 1_900_000_000_000)
     sync = await loadModule({ areas: ['layout'], peers: [PEER], tokens: { desk: 't' } })
     const peer = fakePeer({})
     vi.stubGlobal('fetch', peer.fetchStub)

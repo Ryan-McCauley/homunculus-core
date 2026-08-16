@@ -6,3 +6,27 @@ dist
 .env.local
 *.log
 .DS_Store
+
+# Runtime state and personal data. The image must never carry these: `COPY . .`
+# would otherwise bake live bank statements, trade history, agent mandates and
+# the audit log into image layers, where they survive in any registry the image
+# is pushed to and in anyone's `docker save`. The runtime named volume mounts
+# over /app/data, but Docker SEEDS an empty named volume from the image contents,
+# so leaving them here is load-bearing, not merely untidy.
+# Mirrors the financial-documents rules in .gitignore — keep the two in step.
+data/
+private/
+/btc-ladder-report-*.md
+/*-report-*.md
+
+# Claude Code local config, commands, and generated plan/scratch files
+.claude/
+
+# Test/coverage output and design mockups the app never imports
+coverage/
+mockups/
+*.code-workspace
+
+# Python bytecode from the screening engine
+__pycache__/
+*.pyc

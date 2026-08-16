@@ -31,12 +31,29 @@ const DEVICE_DEFS: Array<{ key: string; label: string; match: RegExp }> = [
   { key: 'backup', label: 'Backup', match: /(^|\.)backup/i }
 ]
 
+/** Ceiling on any single HA request. Node's fetch has NO default timeout, so without
+ *  this a half-open connection stalls a poll indefinitely. Kept just under the poll
+ *  interval so a hung request is abandoned before the next tick is due. */
+const HA_REQUEST_TIMEOUT_MS = Math.max(2_000, POLL_MS - 1_000)
+/** Failed polls tolerated before the house is reported offline. Below this the last
+ *  good snapshot is held (flagged stale) — see the tick loop. */
+const HA_FAILURES_BEFORE_OFFLINE = 3
+
+/** The configured unit never changes while HA is running, so it is fetched once and
+ *  cached rather than re-requested on every poll. */
+let cachedTempUnit: '°F' | '°C' | null = null
+
 async function fetchTempUnit(): Promise<'°F' | '°C'> {
-  const res = await fetch(`${HA_URL}/api/config`, { headers: HEADERS })
-  if (!res.ok) return '°F'
+  if (cachedTempUnit) return cachedTempUnit
+  const res = await fetch(`${HA_URL}/api/config`, {
+    headers: HEADERS,
+    signal: AbortSignal.timeout(HA_REQUEST_TIMEOUT_MS),
+  })
+  if (!res.ok) return '°F'   // not cached: a transient failure shouldn't pin the default
   const cfg = (await res.json()) as Record<string, unknown>
   const unit = (cfg['unit_system'] as Record<string, string> | undefined)?.['temperature']
-  return unit === '°C' ? '°C' : '°F'
+  cachedTempUnit = unit === '°C' ? '°C' : '°F'
+  return cachedTempUnit
 }
 
 function parseClimate(entity: Record<string, unknown>): HaClimateState {
@@ -81,7 +98,7 @@ function groupDevices(entities: HaEntity[]): HaDevice[] {
 
 async function fetchSnapshot(): Promise<Omit<HaSnapshot, 'ts' | 'connected'>> {
   const [statesRes, tempUnit] = await Promise.all([
-    fetch(`${HA_URL}/api/states`, { headers: HEADERS }),
+    fetch(`${HA_URL}/api/states`, { headers: HEADERS, signal: AbortSignal.timeout(HA_REQUEST_TIMEOUT_MS) }),
     fetchTempUnit()
   ])
   if (!statesRes.ok) throw new Error(`HA API ${statesRes.status}`)
@@ -114,6 +131,10 @@ class HomeAssistantHub {
   private listeners = new Set<Listener>()
   private timer: NodeJS.Timeout | null = null
   private latest: HaSnapshot | null = null
+  /** True while a poll is in flight — stops ticks stacking on a slow HA. */
+  private polling = false
+  /** Consecutive failed polls; a blip holds the last snapshot, a run declares offline. */
+  private consecutiveFailures = 0
 
   get configured(): boolean {
     return !!(HA_URL && HA_TOKEN)
@@ -145,16 +166,35 @@ class HomeAssistantHub {
         this.emit(EMPTY())
         return
       }
+      // An in-flight guard, because fetch has no default timeout: a half-open
+      // connection to a struggling HA box would otherwise stall one tick while the
+      // interval kept launching more, piling requests onto the thing already
+      // failing. (fetchSnapshot now carries its own AbortSignal.timeout too.)
+      if (this.polling) return
+      this.polling = true
       try {
         const data = await fetchSnapshot()
+        this.consecutiveFailures = 0
         this.emit({ ts: Date.now(), connected: true, ...data })
       } catch (err) {
-        console.error('[ha] poll failed:', (err as Error).message)
-        this.emit(EMPTY())
+        this.consecutiveFailures++
+        console.error(`[ha] poll failed (${this.consecutiveFailures}):`, (err as Error).message)
+        // Do NOT throw away the last good snapshot on a single blip. Emitting EMPTY
+        // flips connected:false, which makes homewatch and the proactive monitor drop
+        // the edge state they diff against and the chat prompt announce "HA offline"
+        // — for one dropped packet. Hold the last known state for a few failures and
+        // only then declare the house unreachable.
+        if (this.latest && this.consecutiveFailures < HA_FAILURES_BEFORE_OFFLINE) {
+          this.emit({ ...this.latest, ts: Date.now(), stale: true })
+        } else {
+          this.emit(EMPTY())
+        }
+      } finally {
+        this.polling = false
       }
     }
     void tick()
-    this.timer = setInterval(tick, POLL_MS)
+    this.timer = setInterval(() => { void tick() }, POLL_MS)
   }
 
   private stop(): void {
@@ -169,10 +209,15 @@ class HomeAssistantHub {
     const [domain] = service.split('.')
     const svc = service.includes('.') ? service.split('.').slice(1).join('.') : service
     const url = `${HA_URL}/api/services/${domain}/${svc}`
+    // entity_id is spread LAST so a caller-supplied data.entity_id can never
+    // redirect the call to a different entity than the one named here — the
+    // allowlist in routines.ts validates `entityId`, and this guarantees that is
+    // the entity the request actually targets.
     const res = await fetch(url, {
       method: 'POST',
       headers: HEADERS,
-      body: JSON.stringify({ entity_id: entityId, ...data })
+      signal: AbortSignal.timeout(HA_REQUEST_TIMEOUT_MS),
+      body: JSON.stringify({ ...data, entity_id: entityId })
     })
     if (!res.ok) throw new Error(`HA service call failed: ${res.status}`)
   }

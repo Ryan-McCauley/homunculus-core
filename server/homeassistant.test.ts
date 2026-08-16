@@ -226,17 +226,29 @@ describe('sendCommand', () => {
 
   it('posts to /api/services/<domain>/<service> with the entity id merged into the body', async () => {
     const m = await freshModule()
-    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({}) }))
+    const fetchMock = vi.fn((_url: string, _init: { body: string }) => Promise.resolve({ ok: true, status: 200, json: async () => ({}) }))
     vi.stubGlobal('fetch', fetchMock)
     await m.haHub.sendCommand('climate.main_thermostat', 'climate.set_temperature', { temperature: 68 })
-    expect(fetchMock).toHaveBeenCalledWith(
-      'http://ha.local:8123/api/services/climate/set_temperature',
-      expect.objectContaining({
-        method: 'POST',
-        headers: expect.objectContaining({ Authorization: 'Bearer secret-token' }),
-        body: JSON.stringify({ entity_id: 'climate.main_thermostat', temperature: 68 }),
-      }),
-    )
+    const call = fetchMock.mock.calls[0]!
+    expect(call[0]).toBe('http://ha.local:8123/api/services/climate/set_temperature')
+    expect(call[1]).toMatchObject({
+      method: 'POST',
+      headers: expect.objectContaining({ Authorization: 'Bearer secret-token' }),
+    })
+    // Assert the body by value, not by serialized key order (entity_id is now
+    // spread last so a data.entity_id can't override it).
+    expect(JSON.parse(call[1].body)).toEqual({
+      entity_id: 'climate.main_thermostat', temperature: 68,
+    })
+  })
+
+  it('entity_id cannot be overridden by a data.entity_id key', async () => {
+    const m = await freshModule()
+    const fetchMock = vi.fn((_url: string, _init: { body: string }) => Promise.resolve({ ok: true, status: 200, json: async () => ({}) }))
+    vi.stubGlobal('fetch', fetchMock)
+    await m.haHub.sendCommand('switch.lamp', 'switch.turn_on', { entity_id: 'lock.front_door' })
+    const body = JSON.parse(fetchMock.mock.calls[0]![1].body)
+    expect(body.entity_id).toBe('switch.lamp')
   })
 
   it('throws with the HTTP status when the service call fails', async () => {

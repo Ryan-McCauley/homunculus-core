@@ -5,7 +5,7 @@
 import 'dotenv/config'
 import http from 'http'
 import { existsSync, readFileSync, statSync } from 'fs'
-import { extname, join, normalize } from 'path'
+import { extname, join, normalize, sep } from 'path'
 import { WebSocketServer, WebSocket } from 'ws'
 import { telemetryHub } from './telemetry'
 import { ChatSession, chatStatus, addProactiveListener, proactiveMonitor, broadcastProactive } from './chat'
@@ -39,7 +39,7 @@ import { stateStore } from './stateStore'
 import { claudeProcesses } from './claudeProcesses'
 import { componentKind, componentLabel, edgeForAudit } from '../shared/timeline'
 import type { TimelineComponent, TimelineEdge, TimelineEvent, TimelineRun } from '../shared/timeline'
-import { ACTOR_HEADER, ADMIN_TOKEN_HEADER, adminTokenMatches, deriveActor } from '../shared/audit'
+import { ACTOR_HEADER, ADMIN_TOKEN_HEADER, constantTimeEquals, deriveActor } from '../shared/audit'
 import { ALERT_SOURCES, ALERT_TIMEFRAMES } from '../shared/alerts'
 import { getLayout, setLayout, resetLayout, isSetupComplete, markSetupComplete } from './layout'
 import { buildManifest, getSyncConfig, readSyncFile, runSync, setSyncConfig, writeSyncFile } from './sync'
@@ -83,19 +83,68 @@ function isLocalReq(req: http.IncomingMessage): boolean {
   return ip === '127.0.0.1' || ip === '::1'
 }
 
+// ── Origin gate ─────────────────────────────────────────────────────────
+//
+// The localhost bypass below (and the WS upgrade handler's own copy of it) exists
+// for the desktop UI hitting its own backend — a real convenience. Its blind spot
+// is that a browser enforces none of that intent: ANY page open in the same
+// browser, on any domain, can fetch() or open a WebSocket to localhost:8787 and
+// is just as "local" by the isLocalReq test above. What tells the two apart is
+// the Origin header, which a browser attaches to every cross-origin fetch/XHR
+// and to every WebSocket handshake, and which script cannot forge.
+//
+// A non-browser caller (curl, a strategy skill, the sync peer-to-peer fetch)
+// sends no Origin at all — that is not a browser signature to trust, so an
+// ABSENT Origin falls through to whatever token gate already applies. A PRESENT
+// Origin that isn't this server's own origin (or, in dev, the Vite renderer) is
+// exactly what a malicious cross-site page looks like on the wire, and is
+// rejected outright before any handler — including the token check — runs.
+const DEV_ORIGINS = new Set(['http://localhost:5173', 'http://127.0.0.1:5173'])
+
+function isAllowedOrigin(req: http.IncomingMessage): boolean {
+  const origin = req.headers.origin
+  if (!origin) return true
+  if (DEV_ORIGINS.has(origin)) return true
+  try {
+    // Same-origin: the Origin's host:port equals whatever the client dialed
+    // (the Host header) — true whether that's localhost:8787 or a tailnet
+    // address:8787, and independent of which of those this node happens to be.
+    return new URL(origin).host === (req.headers.host || '')
+  } catch {
+    return false
+  }
+}
+
 // Token gate for sensitive routes (mirrors the WS upgrade handler): localhost is
 // always allowed; remote callers (e.g. the iPhone view over Tailscale) must
 // present HOMUNCULUS_TOKEN via ?token= or the x-homunculus-token header. Used to
 // protect /api/crypto/* so portfolio data isn't served unauthenticated off the
 // home PC. Returns true if allowed; otherwise writes 401 and returns false.
+//
+// This is the SECOND gate, not the only one: isAllowedOrigin() above has already
+// run for every /api/ request by the time this is called, so a request that
+// reaches here either carried no Origin (a trusted non-browser caller) or one
+// that matches this server. requireToken alone was never enough to stop a
+// same-machine browser page — that is what the Origin check is for.
 function requireToken(req: http.IncomingMessage, res: http.ServerResponse): boolean {
-  if (!TOKEN || isLocalReq(req)) return true
+  if (isLocalReq(req)) return true
+  const deny = (code: number, error: string): boolean => {
+    res.writeHead(code, { 'content-type': 'application/json', 'access-control-allow-origin': corsOrigin(req) })
+    res.end(JSON.stringify({ ok: false, error }))
+    return false
+  }
+  // An unconfigured gate is a CLOSED gate, exactly as requireAdminToken below has
+  // always treated it. This used to `return true` when TOKEN was empty, which made
+  // "no token configured" mean "no authentication at all" for every remote caller:
+  // published on a LAN or a tailnet, that served finance data, trade staging and
+  // the agent fleet to anyone who could reach the port. Localhost still bypasses
+  // (above) so the desktop app and the operator's own machine are unaffected.
+  if (!TOKEN) return deny(503, 'HOMUNCULUS_TOKEN is not configured — remote access is refused until it is set')
   const url = new URL(req.url || '', 'http://localhost')
-  const provided = url.searchParams.get('token') || req.headers['x-homunculus-token']
-  if (provided === TOKEN) return true
-  res.writeHead(401, { 'content-type': 'application/json', 'access-control-allow-origin': '*' })
-  res.end(JSON.stringify({ ok: false, error: 'unauthorized' }))
-  return false
+  const raw = req.headers['x-homunculus-token']
+  const provided = url.searchParams.get('token') || (Array.isArray(raw) ? raw[0] : raw) || ''
+  if (constantTimeEquals(provided, TOKEN)) return true
+  return deny(401, 'unauthorized')
 }
 
 // Admin gate for audit-log management. Three deliberate differences from
@@ -106,15 +155,42 @@ function requireToken(req: http.IncomingMessage, res: http.ServerResponse): bool
 // governs the annotate route, the sole sanctioned way to amend the record.
 function requireAdminToken(req: http.IncomingMessage, res: http.ServerResponse): boolean {
   const deny = (code: number, error: string): boolean => {
-    res.writeHead(code, { 'content-type': 'application/json', 'access-control-allow-origin': '*' })
+    res.writeHead(code, { 'content-type': 'application/json', 'access-control-allow-origin': corsOrigin(req) })
     res.end(JSON.stringify({ ok: false, error }))
     return false
   }
   if (!ADMIN_TOKEN) return deny(503, 'admin token not configured (set HOMUNCULUS_ADMIN_TOKEN)')
   const raw = req.headers[ADMIN_TOKEN_HEADER]
   const provided = Array.isArray(raw) ? raw[0] || '' : raw || ''
-  if (adminTokenMatches(provided, ADMIN_TOKEN)) return true
+  if (constantTimeEquals(provided, ADMIN_TOKEN)) return true
   return deny(401, 'admin token required')
+}
+
+// The CORS response value for a request that has already passed isAllowedOrigin:
+// reflect the specific Origin back (never '*') so the browser's own same-origin
+// rules are what decide who can read the response. A caller with no Origin
+// (curl, a peer node, a skill) isn't a browser and ignores this header entirely.
+function corsOrigin(req: http.IncomingMessage): string {
+  return req.headers.origin || '*'
+}
+
+// Defensive headers on every response, API and static alike. nosniff and
+// no-referrer are cheap and standard. The CSP mirrors index.html's own <meta>
+// policy (Google Fonts, ws:/wss: for the transport) so it tightens nothing that
+// already works — except frame-ancestors and base-uri, which a <meta> CSP is
+// spec'd to ignore and only an HTTP header can enforce. frame-ancestors is the
+// one that matters most here: it closes the clickjacking angle CORS says
+// nothing about (a confirm-trade button framed invisibly on another site).
+function securityHeaders(): Record<string, string> {
+  return {
+    'x-content-type-options': 'nosniff',
+    'x-frame-options': 'DENY',
+    'referrer-policy': 'no-referrer',
+    'content-security-policy':
+      "default-src 'self'; connect-src 'self' ws: wss: http://localhost:* https://localhost:*; " +
+      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; " +
+      "script-src 'self'; frame-ancestors 'none'; base-uri 'none'",
+  }
 }
 
 // ── API routes ────────────────────────────────────────────────────────
@@ -136,25 +212,57 @@ async function handleApi(
   // attempt is exactly the kind of thing an audit reader wants to see.
   const auditable = req.method !== 'GET' && req.method !== 'OPTIONS' && !path.startsWith('/api/audit')
   const json = (code: number, body: unknown): void => {
-    // Allow the dev renderer (vite :5173) to fetch the REST API on :8787. In
-    // production the UI is served same-origin by this backend, so '*' is a
-    // localhost-only convenience, not an exposure. The WS isn't CORS-gated.
+    // Reflects the caller's own Origin rather than '*' — see isAllowedOrigin
+    // above, which has already rejected anything that shouldn't be here. A
+    // caller with no Origin (curl, a peer node, a skill) never reads this
+    // header at all, so '*' there is inert, not a grant.
     res.writeHead(code, {
       'content-type': 'application/json',
-      'access-control-allow-origin': '*'
+      'access-control-allow-origin': corsOrigin(req),
+      vary: 'origin',
+      ...securityHeaders(),
     })
     res.end(JSON.stringify(body))
     if (auditable) {
       const ok = (body as { ok?: unknown } | null)?.ok
+      const actor = currentActor()
+      // An agent:/skill: actor on an 'http' entry is, structurally, always a
+      // self-asserted claim: deriveActor only ever produces that shape from the
+      // caller-supplied x-homunculus-actor header (see the comment where it's
+      // read below), and nothing here cryptographically ties a request to a
+      // specific agent the way HOMUNCULUS_TOKEN ties it to "some holder of the
+      // token". Flagging it costs nothing and lets a reader of the log (or a
+      // future admin view) tell "the fleet did this" apart from "someone with
+      // the token said the fleet did this" — a distinction the audit log's own
+      // stated purpose depends on. Richer per-feature entries recorded with
+      // origin:'internal' (agent.trade.*, agent.run.*, …) are unaffected: those
+      // set actor from a server-side record lookup, not a header, so the claim
+      // there is already the authenticated one.
+      const selfAsserted = actor.startsWith('agent:') || actor.startsWith('skill:')
       auditLog.record({
-        actor: currentActor(),
+        actor,
         origin: 'http',
         action: `http.${(req.method || 'get').toLowerCase()}`,
         resource: path,
         summary: `${req.method} ${path} → ${code}`,
-        meta: { method: req.method, path, status: code, ...(typeof ok === 'boolean' ? { ok } : {}) },
+        meta: {
+          method: req.method, path, status: code, ...(typeof ok === 'boolean' ? { ok } : {}),
+          ...(selfAsserted ? { actorSelfAsserted: true } : {}),
+        },
       })
     }
+  }
+
+  // Runs before every other check, including the CORS preflight below: a
+  // request whose Origin doesn't belong to this server (or, in dev, the Vite
+  // renderer) is refused outright. This is what actually stops a same-machine
+  // browser page from reaching localhost-bypassed routes — requireToken alone
+  // never could, since the browser IS the local caller as far as isLocalReq
+  // can tell. See isAllowedOrigin's own comment for the full reasoning.
+  if (!isAllowedOrigin(req)) {
+    res.writeHead(403, { 'content-type': 'application/json', ...securityHeaders() })
+    res.end(JSON.stringify({ ok: false, error: 'origin not allowed' }))
+    return true
   }
 
   // CORS preflight: the dev renderer (vite :5173) sends an OPTIONS preflight before any
@@ -162,10 +270,12 @@ async function handleApi(
   // POSTs fail with "Failed to fetch" while header-less POSTs/GETs (no preflight) work.
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
-      'access-control-allow-origin': '*',
+      'access-control-allow-origin': corsOrigin(req),
+      vary: 'origin',
       'access-control-allow-methods': 'GET, POST, PATCH, DELETE, OPTIONS',
       'access-control-allow-headers': 'content-type, x-homunculus-token, x-homunculus-actor, x-homunculus-admin-token',
       'access-control-max-age': '86400',
+      ...securityHeaders(),
     })
     res.end()
     return true
@@ -252,10 +362,20 @@ async function handleApi(
     return json(result.ok ? 200 : 400, result), true
   }
 
-  // POST /api/sync/file  — a peer hands us a file it holds newer
+  // POST /api/sync/file  — a peer hands us a file it holds newer. A larger cap
+  // than the general body reader: base64 inflates a file by ~1/3, so matching
+  // sync.ts's own 32 MB MAX_FILE_BYTES needs headroom past that, not up to it.
   if (path === '/api/sync/file' && req.method === 'POST') {
     if (!requireToken(req, res)) return true
-    const body = await readBody(req)
+    const raw = await readRawBody(req, 48 * 1024 * 1024)
+    if (raw === null) return json(413, { ok: false, error: 'payload too large' }), true
+    let body: Record<string, unknown> = {}
+    try {
+      const parsed = JSON.parse(raw)
+      if (parsed && typeof parsed === 'object') body = parsed as Record<string, unknown>
+    } catch {
+      return json(400, { ok: false, error: 'invalid JSON' }), true
+    }
     const result = writeSyncFile(
       String(body['path'] ?? ''),
       String(body['content'] ?? ''),
@@ -323,6 +443,7 @@ async function handleApi(
 
   // POST /api/proactive/trigger  — fire a proactive check right now
   if (path === '/api/proactive/trigger' && req.method === 'POST') {
+    if (!requireToken(req, res)) return true
     const snap = haHub.getLatest()
     if (!snap?.connected) return json(503, { ok: false, error: 'HA offline' }), true
     proactiveMonitor.triggerNow(snap)
@@ -331,6 +452,7 @@ async function handleApi(
 
   // POST /api/proactive/say  — broadcast a custom message to all clients
   if (path === '/api/proactive/say' && req.method === 'POST') {
+    if (!requireToken(req, res)) return true
     const body = await readBody(req)
     const text = body.text as string
     if (!text) return json(400, { ok: false, error: 'body.text required' }), true
@@ -338,8 +460,10 @@ async function handleApi(
     return json(200, { ok: true }), true
   }
 
-  // POST /api/routine/:name  — execute a named routine
+  // POST /api/routine/:name  — execute a named routine. Gated: several routines
+  // (open the charge port, start charging) act on physical hardware.
   if (path.startsWith('/api/routine/') && req.method === 'POST') {
+    if (!requireToken(req, res)) return true
     const name = path.slice('/api/routine/'.length)
     const result = await executeRoutine(name)
     return json(result.ok ? 200 : 400, result), true
@@ -347,12 +471,14 @@ async function handleApi(
 
   // GET /api/routines  — list available routines
   if (path === '/api/routines' && req.method === 'GET') {
+    if (!requireToken(req, res)) return true
     const list = Object.entries(ROUTINES).map(([key, r]) => ({ key, label: r.label, description: r.description }))
     return json(200, list), true
   }
 
   // GET /api/history/telemetry?metric=cpu_load&from=<ms>&to=<ms>&limit=500
   if (path === '/api/history/telemetry' && req.method === 'GET') {
+    if (!requireToken(req, res)) return true
     const q = new URL(req.url || '', 'http://localhost').searchParams
     const metric = (q.get('metric') || 'cpu_load') as TelemetryMetric
     const now = Date.now()
@@ -365,6 +491,7 @@ async function handleApi(
 
   // GET /api/history/ha?entity_id=sensor.voltaire_battery_level&from=<ms>&to=<ms>&limit=500
   if (path === '/api/history/ha' && req.method === 'GET') {
+    if (!requireToken(req, res)) return true
     const q = new URL(req.url || '', 'http://localhost').searchParams
     const entityId = q.get('entity_id') || ''
     if (!entityId) return json(400, { ok: false, error: 'entity_id required' }), true
@@ -378,6 +505,7 @@ async function handleApi(
 
   // GET /api/history/entities  — list all HA entity IDs that have history
   if (path === '/api/history/entities' && req.method === 'GET') {
+    if (!requireToken(req, res)) return true
     const entities = await historyHub.listHaEntities()
     return json(200, { entities }), true
   }
@@ -697,11 +825,8 @@ async function handleApi(
 
   if (path === '/api/crypto/stage' && req.method === 'POST') {
     if (!requireToken(req, res)) return true
-    const body = await new Promise<string>((resolve) => {
-      let data = ''
-      req.on('data', (chunk) => { data += chunk })
-      req.on('end', () => resolve(data))
-    })
+    const body = await readRawBody(req)
+    if (body === null) return json(413, { ok: false, error: 'payload too large' }), true
     try {
       const payload = JSON.parse(body) as {
         symbol: string; side: 'buy' | 'sell'; type: 'market' | 'limit' | 'stop-limit'
@@ -852,11 +977,8 @@ async function handleApi(
   // POST /api/crypto/plan-report  — skill posts markdown trade plan status here
   if (path === '/api/crypto/plan-report' && req.method === 'POST') {
     if (!requireToken(req, res)) return true
-    const body = await new Promise<string>((resolve) => {
-      let data = ''
-      req.on('data', (chunk) => { data += chunk })
-      req.on('end', () => resolve(data))
-    })
+    const body = await readRawBody(req)
+    if (body === null) return json(413, { ok: false, error: 'payload too large' }), true
     try {
       const { report } = JSON.parse(body) as { report: string }
       if (typeof report !== 'string') return json(400, { ok: false, error: 'report string required' }), true
@@ -1102,7 +1224,22 @@ async function handleApi(
     }
 
     // POST /api/crypto/agents/:id/propose  — THE trade gate. Called by the agent itself.
+    //
+    // Requires that agent's OWN key, not just the shared token. Every agent runs on
+    // localhost (where requireToken is waived) and every agent id is listed in every
+    // agent's prompt, so without this an advisory agent — or any injected instruction
+    // reaching any agent — could POST to an auto agent's URL and trade under its cap.
+    // The autonomy dial has to belong to the caller, not to the path.
     if (action === 'propose' && req.method === 'POST') {
+      const rawKey = req.headers['x-homunculus-agent-key']
+      const agentKey = (Array.isArray(rawKey) ? rawKey[0] : rawKey) || ''
+      if (!agentFleet.verifyProposeKey(agentId, agentKey)) {
+        return json(403, {
+          ok: false,
+          outcome: 'refused',
+          error: 'x-homunculus-agent-key missing or does not belong to this agent',
+        }), true
+      }
       const body = await readBody(req)
       const result = await agentFleet.propose(agentId, {
         symbol: String(body.symbol ?? ''),
@@ -1464,11 +1601,8 @@ async function handleApi(
   // price=null clears the override. Used when Gemini trade history can't reconstruct an entry.
   if (path === '/api/crypto/cost-basis' && req.method === 'POST') {
     if (!requireToken(req, res)) return true
-    const body = await new Promise<string>((resolve) => {
-      let data = ''
-      req.on('data', (chunk) => { data += chunk })
-      req.on('end', () => resolve(data))
-    })
+    const body = await readRawBody(req)
+    if (body === null) return json(413, { ok: false, error: 'payload too large' }), true
     try {
       const { currency, price } = JSON.parse(body) as { currency: string; price: number | null }
       if (typeof currency !== 'string' || !currency) return json(400, { ok: false, error: 'currency required' }), true
@@ -1648,13 +1782,55 @@ async function handleApi(
   return false
 }
 
-function readBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+// Bytes past which a request body is rejected outright, sized for the largest
+// ordinary JSON payload this API accepts (a strategy report, a full agent
+// mandate) with headroom. A chunked-encoding request carries no Content-Length
+// a handler could check up front, so this cap is enforced on the accumulation
+// itself — the only place that works for every route uniformly. The one route
+// that legitimately needs more is /api/sync/file, which reads through
+// readRawBody with its own larger explicit limit below.
+const MAX_BODY_BYTES = 4 * 1024 * 1024
+
+// Accumulates a request body up to maxBytes; destroys the connection and
+// resolves null past that instead of continuing to buffer. Every JSON body
+// reader in this file goes through this, so none of them can be walked into
+// exhausting the process by a body with no declared length.
+function readRawBody(req: http.IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<string | null> {
   return new Promise((resolve) => {
     let raw = ''
-    req.on('data', (chunk) => { raw += chunk })
-    req.on('end', () => {
-      try { resolve(JSON.parse(raw)) } catch { resolve({}) }
+    let bytes = 0
+    let settled = false
+    const finish = (value: string | null): void => {
+      if (settled) return
+      settled = true
+      resolve(value)
+    }
+    req.on('data', (chunk: Buffer) => {
+      bytes += chunk.length
+      if (bytes > maxBytes) {
+        finish(null)
+        req.destroy()
+        return
+      }
+      raw += chunk
     })
+    req.on('end', () => finish(raw))
+    req.on('error', () => finish(null))
+  })
+}
+
+/** Parsed JSON body. A body over the cap or that fails to parse resolves to {}
+ *  — every call site already treats a missing expected field as a 400, so an
+ *  oversized or malformed body fails the same way a truly empty one would. */
+function readBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+  return readRawBody(req).then((raw) => {
+    if (raw === null) return {}
+    try {
+      const parsed = JSON.parse(raw)
+      return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {}
+    } catch {
+      return {}
+    }
   })
 }
 
@@ -1672,8 +1848,9 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse): void 
   }
   const urlPath = (req.url || '/').split('?')[0]
   let filePath = normalize(join(WEB_DIR, urlPath === '/' ? 'index.html' : urlPath))
-  // Prevent path traversal outside WEB_DIR.
-  if (!filePath.startsWith(WEB_DIR)) {
+  // Prevent path traversal outside WEB_DIR. The trailing separator matters: without
+  // it, WEB_DIR="/app/out/renderer" would also admit a sibling "/app/out/renderer-x".
+  if (filePath !== WEB_DIR && !filePath.startsWith(WEB_DIR + sep)) {
     res.writeHead(403).end('forbidden')
     return
   }
@@ -1683,7 +1860,7 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse): void 
   }
   try {
     const body = readFileSync(filePath)
-    res.writeHead(200, { 'content-type': MIME[extname(filePath)] || 'application/octet-stream' })
+    res.writeHead(200, { 'content-type': MIME[extname(filePath)] || 'application/octet-stream', ...securityHeaders() })
     res.end(body)
   } catch {
     res.writeHead(404).end('not found')
@@ -1703,30 +1880,61 @@ const server = http.createServer(async (req, res) => {
   }
   serveStatic(req, res)
 })
-const wss = new WebSocketServer({ noServer: true })
+// maxPayload caps a single WS frame; ws's own default is 100 MB, which a
+// terminal or chat connection has no legitimate reason to ever send. 8 MB
+// matches the general HTTP body cap above.
+const wss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024 })
 
 // ── Auth on WS upgrade (optional token) ───────────────────────────────
+//
+// A WebSocket handshake is not subject to the browser's same-origin policy the
+// way fetch()/XHR are, so the Origin check here carries the whole weight of
+// keeping an arbitrary page from opening this socket — there is no equivalent
+// of the REST layer's CORS response headers to fall back on. See
+// isAllowedOrigin's own comment for why an absent Origin still passes through
+// to the token check below rather than being rejected outright.
 server.on('upgrade', (req, socket, head) => {
-  if (TOKEN) {
-    const remoteIp = (req.socket.remoteAddress || '').replace(/^::ffff:/, '')
-    const isLocal = remoteIp === '127.0.0.1' || remoteIp === '::1'
-    if (!isLocal) {
-      const url = new URL(req.url || '', 'http://localhost')
-      if (url.searchParams.get('token') !== TOKEN) {
-        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n')
-        socket.destroy()
-        return
-      }
+  if (!isAllowedOrigin(req)) {
+    socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
+    socket.destroy()
+    return
+  }
+  const remoteIp = (req.socket.remoteAddress || '').replace(/^::ffff:/, '')
+  const isLocal = remoteIp === '127.0.0.1' || remoteIp === '::1'
+  if (!isLocal) {
+    // Fail closed, matching requireToken: an unset HOMUNCULUS_TOKEN refuses
+    // remote sockets rather than waiving the check for them. This socket carries
+    // telemetry, home state, the Computer Core and (token permitting) a PTY.
+    if (!TOKEN) {
+      socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n')
+      socket.destroy()
+      return
+    }
+    const url = new URL(req.url || '', 'http://localhost')
+    if (!constantTimeEquals(url.searchParams.get('token') || '', TOKEN)) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n')
+      socket.destroy()
+      return
     }
   }
   wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req))
 })
 
 // ── Per-connection wiring ─────────────────────────────────────────────
-wss.on('connection', (ws: WebSocket) => {
+wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
   const send = (msg: ServerMsg): void => {
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg))
   }
+
+  // The upgrade handler above waives the token for a local socket, the same
+  // convenience requireToken gives ordinary REST routes — sensible for the
+  // dashboard itself, but not for a channel that hands out a shell with the
+  // process's own environment (Gemini/HA/Claude credentials) in it. The
+  // terminal re-checks the actual token match here rather than inheriting the
+  // upgrade's localhost waiver, so opening a PTY always costs the real secret
+  // once one is configured, regardless of where the socket dialed in from.
+  const wsUrl = new URL(req.url || '', 'http://localhost')
+  const hasValidToken = !TOKEN || constantTimeEquals(wsUrl.searchParams.get('token') || '', TOKEN)
 
   const chat = new ChatSession(send)
   const term = new TerminalManager(send)
@@ -1758,7 +1966,17 @@ wss.on('connection', (ws: WebSocket) => {
         else if (msg.type === 'send') void chat.streamTurn(msg.id, msg.text, telemetryHub.getLatest())
         break
       case 'term':
-        if (msg.type === 'start') term.start(msg.id, msg.cols, msg.rows)
+        if (msg.type === 'start') {
+          if (!hasValidToken) {
+            send({
+              ch: 'term', type: 'data', id: msg.id,
+              data: '\x1b[31m[ Terminal blocked ]\x1b[0m HOMUNCULUS_TOKEN required to open a shell.\r\n',
+            })
+            send({ ch: 'term', type: 'exit', id: msg.id, exitCode: 1 })
+            break
+          }
+          term.start(msg.id, msg.cols, msg.rows)
+        }
         else if (msg.type === 'input') term.input(msg.id, msg.data)
         else if (msg.type === 'resize') term.resize(msg.id, msg.cols, msg.rows)
         else if (msg.type === 'kill') term.kill(msg.id)
@@ -1830,10 +2048,82 @@ void historyHub.start().then(() => {
   archiveHub.start()
 })
 
+// ── Crash guards & graceful shutdown ────────────────────────────────────
+//
+// This process holds live exchange orders — the software stop-loss/take-profit
+// monitor tracks brackets only in memory — and runs ~13 interval timers plus
+// many fire-and-forget calls into Gemini, Home Assistant, CoinMarketCap and
+// Postgres. Node's default on an unhandled rejection is to terminate; without a
+// handler, one flaky network response kills the process mid-bracket with resting
+// orders still live on the exchange and nothing watching them. These make that
+// loud and recorded instead of silent, and give a real shutdown signal
+// (SIGTERM/SIGINT — what `docker stop`, a process manager, or Ctrl-C send) a
+// chance to flush the audit queue and close connections before exit, rather
+// than the process just vanishing.
+let shuttingDown = false
+
+function logFatal(kind: string, err: unknown): void {
+  const message = err instanceof Error ? (err.stack || err.message) : String(err)
+  console.error(`[fatal] ${kind}:`, message)
+  try {
+    auditLog.record({
+      actor: 'system', origin: 'internal', action: 'process.fatal',
+      resource: 'server', summary: `${kind}: ${message.split('\n')[0]?.slice(0, 200) ?? message.slice(0, 200)}`,
+    })
+  } catch {
+    // The audit write itself is what's failing here — nothing more to do.
+  }
+}
+
+process.on('unhandledRejection', (reason) => {
+  // Logged, not exited: most of this app's own rejections are already handled
+  // (every hub method that can fail returns a result rather than throwing), so
+  // an unhandled one is more likely a bug worth surfacing than a sign the
+  // process is unrecoverable. uncaughtException below is the one that exits.
+  logFatal('unhandledRejection', reason)
+})
+
+process.on('uncaughtException', (err) => {
+  logFatal('uncaughtException', err)
+  // Node's own guidance: the process is in an undefined state after a truly
+  // uncaught exception and must not keep serving requests. Exit non-zero so a
+  // supervisor (Docker's restart: unless-stopped, a process manager) restarts
+  // it clean rather than it limping on half-initialized.
+  process.exit(1)
+})
+
+async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) return
+  shuttingDown = true
+  console.log(`[homunculus] ${signal} received, shutting down…`)
+  for (const ws of wss.clients) ws.close(1001, 'server shutting down')
+  const closed = new Promise<void>((resolve) => server.close(() => resolve()))
+  // Bounded: an idle keep-alive HTTP connection can otherwise hold server.close()
+  // open indefinitely. 5s is generous for anything genuinely in flight.
+  await Promise.race([closed, new Promise((resolve) => setTimeout(resolve, 5000))])
+  await auditLog.stop().catch((err) => console.error('[homunculus] auditLog.stop failed:', (err as Error).message))
+  await stateStore.stop().catch((err) => console.error('[homunculus] stateStore.stop failed:', (err as Error).message))
+  process.exit(0)
+}
+
+process.on('SIGTERM', () => void shutdown('SIGTERM'))
+process.on('SIGINT', () => void shutdown('SIGINT'))
+
 server.listen(PORT, HOST, () => {
   console.log(`[homunculus] backend listening on http://${HOST}:${PORT}`)
-  console.log(`[homunculus] auth: ${TOKEN ? 'token required' : 'OPEN (no HOMUNCULUS_TOKEN set)'}`)
+  console.log(`[homunculus] auth: ${TOKEN
+    ? 'token required for remote callers (localhost waived)'
+    : 'LOCALHOST ONLY — no HOMUNCULUS_TOKEN set, remote callers are refused (503)'}`)
   console.log(`[homunculus] web dir: ${WEB_DIR} (${existsSync(WEB_DIR) ? 'present' : 'not built'})`)
+  // Binding every interface with no token is the configuration that used to serve
+  // the terminal and the trading API to the whole LAN. It now fails closed, but the
+  // operator almost certainly meant to set a token — say so where they will see it.
+  if (!TOKEN && HOST !== '127.0.0.1' && HOST !== 'localhost' && HOST !== '::1') {
+    console.warn(
+      `[homunculus] WARNING: listening on ${HOST} with no HOMUNCULUS_TOKEN. Remote requests are ` +
+      `refused, so anything beyond this machine will not work until you set one.`
+    )
+  }
   // Surface the chain state at boot: a broken chain means someone edited the
   // record, and that is not something to discover weeks later in the UI.
   void (async () => {

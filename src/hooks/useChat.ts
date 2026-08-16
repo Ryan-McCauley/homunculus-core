@@ -80,11 +80,28 @@ export function useChat(): UseChat {
       if (meta?.chatLog === false) return
       setTurns((prev) => appendTurn(prev, { id, role: 'core', text }))
     })
+    // A dropped socket means the in-flight turn's 'done'/'error' is never coming.
+    // Without this the `busy` latch below stays set forever and send() early-returns
+    // on it — the Computer Core silently stopped accepting input until a page
+    // reload, which on an app that runs for days is a guaranteed eventual lockup.
+    const offDisconnect = window.homunculus.onDisconnect(() => {
+      const streamingId = activeId.current
+      if (streamingId) {
+        setTurns((prev) => prev.map((t) => (
+          t.id === streamingId
+            ? { ...t, streaming: false, error: true, text: t.text || 'Connection lost before the Core replied.' }
+            : t
+        )))
+        activeId.current = null
+      }
+      setBusy(false)
+    })
     return () => {
       offDelta()
       offDone()
       offError()
       offProactive()
+      offDisconnect()
     }
   }, [])
 

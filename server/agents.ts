@@ -37,7 +37,10 @@ import { stateStore } from './stateStore'
 import { ALERT_MAX_PER_CREATOR, alertCatalogText } from '../shared/alerts'
 import { bindFleet } from './cryptoAlerts'
 import { auditLog, withActor } from './auditLog'
+import { constantTimeEquals } from '../shared/audit'
 import { claudeProcesses } from './claudeProcesses'
+import { claudeResultError } from './claudeResult'
+import { agentEnv } from './agentEnv'
 
 const MODEL = process.env['HOMUNCULUS_MODEL'] || ''
 
@@ -56,6 +59,17 @@ const WATCH_INTERVAL_MS = 30_000
 // An agent run that somehow never settles is force-failed after this, so the fleet does not
 // deadlock behind a stuck session.
 const RUN_TIMEOUT_MS = 10 * 60_000
+// TRD-02: maxUsd and AGENT_MAX_USD_CEILING both bound a single trade — nothing previously
+// bounded how many of those an 'auto' agent could place back to back. A $20-cap agent could
+// legitimately auto-execute forty $19 trades in one interval-triggered run and stay under
+// every per-trade check the whole way. This is the cumulative half of that gate: no agent may
+// auto-execute more than ROLLING_BUDGET_MULTIPLIER × its own per-trade cap within a rolling
+// window. Tracked in a dedicated, time-trimmed spend ledger (AgentRecord.spendLog) rather
+// than derived from rec.decisions: that array is capped by COUNT across all outcomes, so an
+// agent could flush its own executed rows out of the window with cheap refused proposals and
+// win back a fresh budget. See rollingSpend().
+const ROLLING_BUDGET_WINDOW_MS = 24 * 60 * 60_000
+const ROLLING_BUDGET_MULTIPLIER = 10
 // Turns one run may take. Was 40, which the desk's research roles hit routinely — a run
 // that dies on the limit has already spent everything it spent, so the cheap fix is to let
 // the long ones land rather than pay for them twice.
@@ -69,6 +83,22 @@ interface AgentRecord {
    *  the runs because a decision can arrive with no run in flight (a chat turn asking the
    *  agent to buy something), and those must not vanish from the audit trail. */
   decisions?: AgentDecision[]
+  /** Auto-executed notional, for the rolling budget. Deliberately separate from
+   *  `decisions` (which is count-capped and therefore evictable by the spender) and
+   *  trimmed only by time. Nothing but real executions is appended here. */
+  spendLog?: { at: number; usd: number }[]
+  /**
+   * This agent's own credential for /propose. Generated at hire, injected only into
+   * THIS agent's system prompt, and never returned by any read route.
+   *
+   * Without it, the autonomy dial keyed off the URL rather than the caller: every
+   * agent id appears in every agent's prompt under COLLEAGUES, and every agent runs
+   * on localhost where the shared token is waived — so an ADVISORY agent (or any
+   * injected instruction reaching any agent) could POST to an AUTO agent's propose
+   * URL and get immediate execution under that agent's cap. The advisory/propose/
+   * auto distinction was a prompt-level suggestion; this makes it enforceable.
+   */
+  proposeKey?: string
   /** Agent SDK session id, so chat turns resume rather than re-explaining every time. */
   sessionId?: string
   /** Usage of the last chat turn. Because chat resumes `sessionId`, its contextTokens is
@@ -107,15 +137,6 @@ function normalizeModel(v: string | undefined): string {
     throw new Error(`unknown model "${m}" — pick one of: ${AGENT_MODELS.map((c) => c.id || 'server default').join(', ')}`)
   }
   return m
-}
-
-function localEnv(): Record<string, string> {
-  const env: Record<string, string> = {}
-  for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v
-  // Force the local subscription path, exactly as strategyRunner does.
-  delete env['ANTHROPIC_API_KEY']
-  delete env['ANTHROPIC_AUTH_TOKEN']
-  return env
 }
 
 // ── Token accounting ───────────────────────────────────────────────────────
@@ -348,7 +369,7 @@ function officeContext(
   return lines.join('\n')
 }
 
-function systemPromptFor(agent: CryptoAgent, apiBase: string, token: string, roster: { id: string; name: string; title: string }[]): string {
+function systemPromptFor(agent: CryptoAgent, apiBase: string, token: string, roster: { id: string; name: string; title: string }[], proposeKey: string): string {
   const authority =
     agent.autonomy === 'advisory'
       ? 'ADVISORY ONLY. You may analyze, explain and recommend, but you have no trading authority — the server will refuse every proposal you submit. Say what you would do and why; do not attempt to place orders by any other route.'
@@ -371,7 +392,14 @@ the operator's. It is attribution, not authorization — it grants you nothing.
 HOW TO PROPOSE A TRADE — this is the only route that works:
 curl -s -X POST "${apiBase}/api/crypto/agents/${agent.id}/propose?token=${token}" \\
   -H 'Content-Type: application/json' -H 'x-homunculus-actor: agent:${agent.id}' \\
+  -H 'x-homunculus-agent-key: ${proposeKey}' \\
   -d '{"symbol":"ETHUSD","side":"buy","type":"limit","amount":"0.01","price":"2450.00","reason":"why, in one sentence"}'
+
+YOUR AGENT KEY IS YOURS ALONE. The x-homunculus-agent-key above authenticates you as
+${agent.id} specifically — it is what makes your authority yours and not merely the URL's.
+Never write it to the board, a journal, a library document, a report, or any other place a
+colleague could read it, and never use one belonging to another agent. A proposal carrying
+the wrong key is refused no matter whose id is in the URL.
 
 The response tells you what actually happened: outcome "executed", "staged" (queued for the
 operator) or "refused" (with the reason). Trust that response over your own expectations —
@@ -522,7 +550,8 @@ class AgentFleet {
   private records = new Map<string, AgentRecord>()
   private running = new Set<string>()
   private watchTimer: NodeJS.Timeout | null = null
-  /** Snapshot fingerprints from the previous watch tick, for edge detection. */
+  /** Snapshot fingerprints from the previous watch tick, for edge detection.
+   *  `fills` is the newest fill's epoch-ms, not a count — see detectEvents. */
   private lastSeen: { fills: number; signals: Set<string>; pending: Set<string> } | null = null
   private apiBase = `http://127.0.0.1:${process.env['HOMUNCULUS_PORT'] || 8787}`
   private token = process.env['HOMUNCULUS_TOKEN'] || ''
@@ -548,6 +577,9 @@ class AgentFleet {
         if (typeof rec.agent.idleStanddownMinutes !== 'number') {
           rec.agent.idleStanddownMinutes = AGENT_DEFAULTS.idleStanddownMinutes
         }
+        // Agents hired before per-agent propose keys existed get one now, so the
+        // gate applies to the whole fleet rather than only to new hires.
+        if (!rec.proposeKey) rec.proposeKey = randomUUID()
         this.records.set(rec.agent.id, { ...rec, transcript: rec.transcript ?? [], decisions: rec.decisions ?? [] })
       }
       console.log(`[agents] loaded ${this.records.size} agent(s)`)
@@ -593,6 +625,8 @@ class AgentFleet {
     return rec ? this.view(rec) : null
   }
 
+  /** The client-facing projection. Built field-by-field on purpose: spreading the
+   *  record would leak `proposeKey` (and any future secret) to every read route. */
   private view(rec: AgentRecord): AgentView {
     const runs = [...rec.runs].sort((a, b) => b.startedAt - a.startedAt)
     return {
@@ -641,7 +675,7 @@ class AgentFleet {
       createdAt: now,
       updatedAt: now
     }
-    const rec: AgentRecord = { agent, runs: [], transcript: [], decisions: [] }
+    const rec: AgentRecord = { agent, runs: [], transcript: [], decisions: [], proposeKey: randomUUID() }
     this.records.set(id, rec)
     this.save()
     // Hiring opens a personnel file. Title/department/résumé are filled in afterwards
@@ -741,8 +775,25 @@ class AgentFleet {
     const snap = cryptoHub.getSnapshot()
     const last = Number(snap.tickers.find((t) => t.symbol === symbol)?.last) || 0
     const px = Number(req.price) || last
-    const notional = px * (Number(amount) || 0)
+    const amountNum = Number(amount)
 
+    // A price of 0 means there is no live ticker for this symbol — a brand-new
+    // listing, a typo, or a snapshot that hasn't loaded tickers yet after a
+    // restart — not a trade worth zero dollars. Computing notional as px *
+    // amount would let that case sail through both caps below and, with no
+    // price supplied, default to an unbounded market order. Refuse outright
+    // rather than trust a notional this method could not actually establish.
+    if (!(px > 0) || !Number.isFinite(amountNum) || amountNum <= 0) {
+      const detail = !(px > 0)
+        ? `no live price for ${symbol} — cannot establish notional, refusing rather than treating it as free`
+        : 'amount must be a positive number'
+      return this.record(rec, {
+        symbol, side, amount, ...(req.price ? { price: req.price } : {}),
+        notionalUsd: 0, reason: req.reason ?? '', outcome: 'refused', detail,
+      })
+    }
+
+    const notional = px * amountNum
     const base = {
       symbol, side, amount,
       ...(req.price ? { price: req.price } : {}),
@@ -766,11 +817,25 @@ class AgentFleet {
       strategy: agentStrategyId(agent.id)
     })
 
-    // 3. Auto-execute only within the agent's own cap; anything larger degrades to a
-    //    proposal rather than being refused, so the idea still reaches the operator.
-    if (agent.autonomy === 'auto' && notional <= agent.maxUsd) {
+    // 3a. Cumulative check: how much this agent has already committed to auto-executing
+    //     in the trailing window.
+    const rollingSpend = this.rollingSpend(rec)
+    const rollingCap = agent.maxUsd * ROLLING_BUDGET_MULTIPLIER
+    const overRollingBudget = rollingSpend + notional > rollingCap
+
+    // 3b. Auto-execute only within BOTH the agent's own per-trade cap and its rolling
+    //     budget; anything larger degrades to a proposal rather than being refused, so
+    //     the idea still reaches the operator.
+    if (agent.autonomy === 'auto' && notional <= agent.maxUsd && !overRollingBudget) {
+      // Reserve the spend BEFORE awaiting the exchange. Two proposes for the same
+      // agent (a run's curl and a chat turn's, or two curls inside one run) would
+      // otherwise both read the pre-spend total across the await and both execute,
+      // busting the budget by up to a full cap. The reservation is released below
+      // if the order does not actually go through.
+      const reservation = this.reserveSpend(rec, notional)
       const result = await cryptoHub.executeTrade(trade.id)
       if (!result.ok) {
+        this.releaseSpend(rec, reservation)
         return this.record(rec, { ...base, outcome: 'refused', detail: `execution failed: ${result.error ?? 'unknown error'}` })
       }
       console.log(`[agents] ${agent.id} EXECUTED ${side} ${amount} ${symbol} ($${notional.toFixed(2)})`)
@@ -780,9 +845,61 @@ class AgentFleet {
     const detail =
       agent.autonomy === 'auto' && notional > agent.maxUsd
         ? `over this agent's $${agent.maxUsd} auto cap — queued for operator confirmation instead`
-        : undefined
+        : agent.autonomy === 'auto' && overRollingBudget
+          ? `would push this agent's ${ROLLING_BUDGET_WINDOW_MS / 3_600_000}h auto-execute spend to $${(rollingSpend + notional).toFixed(2)}, over its $${rollingCap.toFixed(2)} rolling budget (${ROLLING_BUDGET_MULTIPLIER}× its per-trade cap) — queued for operator confirmation instead`
+          : undefined
     console.log(`[agents] ${agent.id} STAGED ${side} ${amount} ${symbol} ($${notional.toFixed(2)})`)
     return this.record(rec, { ...base, outcome: 'staged', ...(detail ? { detail } : {}), tradeId: trade.id })
+  }
+
+  /**
+   * Whether `key` is the credential belonging to `agentId`.
+   *
+   * Constant-time so a caller cannot recover another agent's key one byte at a time
+   * from response timings — the propose route is unauthenticated-by-locality (every
+   * agent runs on localhost, where the shared token is waived), so this comparison
+   * is the only thing standing between an advisory agent and an auto agent's cap.
+   */
+  verifyProposeKey(agentId: string, key: string): boolean {
+    const expected = this.records.get(agentId)?.proposeKey
+    if (!expected) return false
+    return constantTimeEquals(key, expected)
+  }
+
+  /**
+   * Auto-executed notional inside the rolling window, from a dedicated spend ledger.
+   *
+   * This deliberately does NOT read `rec.decisions`, which is capped at
+   * MAX_DECISIONS_KEPT entries of ALL outcomes. Reading the budget from there meant
+   * the spender could erase its own evidence: an agent near its cap submits ~60
+   * junk proposals (refusals are free and self-service), the executed rows age out
+   * of the array, rollingSpend computes as $0, and it auto-executes another full
+   * budget inside the same 24h. A cap the capped party can reset is not a cap.
+   *
+   * The ledger holds nothing but (timestamp, usd) for actual executions and is
+   * trimmed by TIME, never by count, so nothing can push an entry out early.
+   */
+  private rollingSpend(rec: AgentRecord): number {
+    const windowStart = Date.now() - ROLLING_BUDGET_WINDOW_MS
+    rec.spendLog = (rec.spendLog ?? []).filter((s) => s.at >= windowStart)
+    return rec.spendLog.reduce((sum, s) => sum + s.usd, 0)
+  }
+
+  /** Records committed spend before the exchange call. Returns a handle for release. */
+  private reserveSpend(rec: AgentRecord, usd: number): { at: number; usd: number } {
+    const entry = { at: Date.now(), usd }
+    rec.spendLog = [...(rec.spendLog ?? []), entry]
+    this.save()
+    return entry
+  }
+
+  /** Undoes a reservation whose order never reached the exchange. */
+  private releaseSpend(rec: AgentRecord, entry: { at: number; usd: number }): void {
+    const i = (rec.spendLog ?? []).indexOf(entry)
+    if (i >= 0) {
+      rec.spendLog!.splice(i, 1)
+      this.save()
+    }
   }
 
   /** Appends the decision to the agent's live run (if any) and returns the route payload. */
@@ -903,18 +1020,37 @@ class AgentFleet {
 
   private async execute(rec: AgentRecord, run: AgentRun): Promise<void> {
     const agent = rec.agent
+    let proc: ReturnType<typeof claudeProcesses.register> | null = null
+    // Set by the timeout so the catch/finally below can tell a deadline from an
+    // ordinary failure. Checked before proc.wasStopped(), because a timeout also
+    // aborts the controller and would otherwise read as an operator stop.
+    let timedOut = false
+
+    // A timed-out run used to be marked errored and have its concurrency slot freed
+    // while the SDK session KEPT STREAMING: the fleet then started another agent
+    // (two bypassPermissions sessions despite MAX_CONCURRENT_RUNS = 1), the zombie
+    // went on proposing trades against a live exchange, and its eventual completion
+    // overwrote the timeout's 'error' with 'done'.
+    //
+    // The missing half was the abort. We do both, deliberately: abort() ends the
+    // session, and the bookkeeping still runs here rather than waiting for the
+    // resulting throw — because an SDK that ignores the abort must not be able to
+    // deadlock the whole fleet behind one wedged run. `timedOut` then keeps the
+    // late-settling catch/finally from contradicting this verdict.
     const timeout = setTimeout(() => {
-      if (run.state === 'running') {
-        run.state = 'error'
-        run.error = 'Run timed out.'
-        run.endedAt = Date.now()
-        this.running.delete(agent.id)
-        this.trackRun(rec, run)
-        this.save()
-      }
+      if (run.state !== 'running') return
+      timedOut = true
+      proc?.controller.abort()
+      console.error(`[agents] ${agent.id} run timed out after ${RUN_TIMEOUT_MS / 60_000} min — session aborted`)
+      run.state = 'error'
+      run.error = 'Run timed out.'
+      run.activity = 'Timed out.'
+      run.endedAt = Date.now()
+      this.running.delete(agent.id)
+      this.trackRun(rec, run)
+      this.save()
     }, RUN_TIMEOUT_MS)
 
-    let proc: ReturnType<typeof claudeProcesses.register> | null = null
     // Hoisted out of the try so a run that fails part-way still has something to show. A
     // run that hits the turn limit has usually done most of its work and filed most of its
     // artifacts; discarding everything it said made the heaviest runs the ones the
@@ -975,12 +1111,12 @@ ${marketContext(snap)}`
         options: {
           ...(model ? { model } : {}),
           abortController: proc.controller,
-          systemPrompt: systemPromptFor(agent, this.apiBase, this.token, this.roster()),
+          systemPrompt: systemPromptFor(agent, this.apiBase, this.token, this.roster(), rec.proposeKey ?? ''),
           permissionMode: 'bypassPermissions',
           includePartialMessages: true,
           maxTurns: MAX_RUN_TURNS,
           cwd: process.cwd(),
-          env: localEnv()
+          env: agentEnv()
         }
       })
 
@@ -1031,16 +1167,26 @@ ${marketContext(snap)}`
         } else if (message.type === 'result') {
           // Captured before the error check: a failed run still spent what it spent.
           applyResult(usage, message, model)
-          if (message.subtype !== 'success' || message.is_error) {
-            const detail = 'result' in message && message.result ? message.result : message.subtype
-            throw new Error(String(detail))
-          }
+          const failure = claudeResultError(message)
+          if (failure) throw new Error(failure)
           if ('result' in message && typeof message.result === 'string') tail = message.result
           if ('session_id' in message && message.session_id) rec.sessionId = message.session_id
         }
       }
 
       flush()
+      // The narrow race where the stream finishes just as the deadline fires: the
+      // abort never produced a throw, but the run is still a timeout and must not
+      // resurrect itself as 'done'. Settled here rather than returning early, so
+      // the finally below never records a run left in 'running'.
+      if (timedOut) {
+        run.state = 'error'
+        run.error = 'Run timed out.'
+        run.activity = 'Timed out.'
+        run.summary = tail.trim().slice(-4000)
+        run.endedAt = Date.now()
+        return
+      }
       run.state = 'done'
       run.summary = tail.trim().slice(-4000)
       run.activity = 'Idle.'
@@ -1054,9 +1200,15 @@ ${marketContext(snap)}`
       } else if (/max_turns/i.test(msg)) {
         msg = `Hit the ${MAX_RUN_TURNS}-turn limit before finishing. Anything it filed before that stands; the closing summary below is where it got to.`
       }
-      // An aborted query throws like any other failure; only the registry knows
-      // it was deliberate, so ask before calling it an error the operator caused.
-      if (proc?.wasStopped()) {
+      // Checked before wasStopped(): the timeout aborts the same controller the
+      // operator's STOP does, so without this a deadline would report as a stop.
+      // The verdict is already recorded — keep it, and only add whatever the run
+      // managed to say before it was cut off.
+      if (timedOut) {
+        run.summary = tail.trim().slice(-4000)
+      } else if (proc?.wasStopped()) {
+        // An aborted query throws like any other failure; only the registry knows
+        // it was deliberate, so ask before calling it an error the operator caused.
         console.log(`[agents] ${agent.id} run stopped by operator`)
         run.state = 'done'
         run.activity = 'Stopped.'
@@ -1070,7 +1222,9 @@ ${marketContext(snap)}`
         // failed; this only stops the work it did do from being unreadable.
         run.summary = tail.trim().slice(-4000)
       }
-      run.endedAt = Date.now()
+      // A timed-out run ended at its deadline, not whenever the aborted session
+      // finally unwound — that timestamp is already set and stays.
+      if (!timedOut) run.endedAt = Date.now()
     } finally {
       proc?.done()
       clearTimeout(timeout)
@@ -1111,11 +1265,11 @@ ${marketContext(snap)}`
           ...(model ? { model } : {}),
           abortController: proc.controller,
           ...(rec.sessionId ? { resume: rec.sessionId } : {}),
-          systemPrompt: systemPromptFor(rec.agent, this.apiBase, this.token, this.roster()),
+          systemPrompt: systemPromptFor(rec.agent, this.apiBase, this.token, this.roster(), rec.proposeKey ?? ''),
           permissionMode: 'bypassPermissions',
           maxTurns: 30,
           cwd: process.cwd(),
-          env: localEnv()
+          env: agentEnv()
         }
       })
 
@@ -1135,10 +1289,8 @@ ${marketContext(snap)}`
           })
         } else if (message.type === 'result') {
           applyResult(usage, message, model)
-          if (message.subtype !== 'success' || message.is_error) {
-            const detail = 'result' in message && message.result ? message.result : message.subtype
-            throw new Error(String(detail))
-          }
+          const failure = claudeResultError(message)
+          if (failure) throw new Error(failure)
           if ('result' in message && typeof message.result === 'string') reply = message.result
           if ('session_id' in message && message.session_id) rec.sessionId = message.session_id
         }
@@ -1182,7 +1334,19 @@ ${marketContext(snap)}`
 
   startWatching(): void {
     if (this.watchTimer) return
-    this.watchTimer = setInterval(() => this.tick(), WATCH_INTERVAL_MS)
+    // Contained: tick() reads the snapshot, expires blockers, refreshes the manager's
+    // file (disk I/O plus merge logic over agent-authored data) and starts runs. An
+    // exception in a setInterval callback is an UNCAUGHT exception in Node, so one
+    // malformed manager-file entry would take down the whole trading server — the
+    // bracket monitor and alert evaluation included. The sibling haHub/telemetryHub
+    // ticks have always been wrapped; this one was not.
+    this.watchTimer = setInterval(() => {
+      try {
+        this.tick()
+      } catch (err) {
+        console.error('[agents] watch tick failed:', (err as Error).message)
+      }
+    }, WATCH_INTERVAL_MS)
     if (typeof this.watchTimer.unref === 'function') this.watchTimer.unref()
     console.log('[agents] event watcher started')
   }
@@ -1388,11 +1552,11 @@ ${marketContext(snap)}`
           ...(model ? { model } : {}),
           ...(rec.sessionId ? { resume: rec.sessionId } : {}),
           abortController: proc.controller,
-          systemPrompt: systemPromptFor(agent, this.apiBase, this.token, this.roster()),
+          systemPrompt: systemPromptFor(agent, this.apiBase, this.token, this.roster(), rec.proposeKey ?? ''),
           permissionMode: 'bypassPermissions',
           maxTurns: 6,
           cwd: process.cwd(),
-          env: localEnv()
+          env: agentEnv()
         }
       })
       for await (const message of response) {
@@ -1467,7 +1631,13 @@ ${marketContext(snap)}`
       snap.signals.filter((s) => s.seeded && s.direction !== 'HOLD' && s.entryQuality === 'HIGH').map((s) => `${s.symbol}:${s.direction}`)
     )
     const pending = new Set(snap.pending.map((p) => p.id))
-    const fills = snap.tradeHistory.length
+    // Newest fill TIMESTAMP, not the array length. Per-symbol history is capped at
+    // 500 by fetchMyTrades, so once an active symbol hits that cap new fills displace
+    // old ones and the total length stops growing — `fills > prev.fills` then never
+    // fires again, going deaf exactly when trading is busiest. The length can also
+    // DECREASE when the tracked symbol set changes, silently re-arming at a wrong
+    // baseline. A monotonic clock has neither failure.
+    const fills = snap.tradeHistory.reduce((max, t) => (t.timestampMs > max ? t.timestampMs : max), 0)
 
     const prev = this.lastSeen
     if (prev) {

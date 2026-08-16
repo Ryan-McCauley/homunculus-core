@@ -24,9 +24,19 @@ function resolveWsUrl(): string {
   return url.toString()
 }
 
+/** Queued messages are dropped past this. A backlog only builds while the socket
+ *  is down, and replaying an unbounded one on reconnect is worse than losing it. */
+const MAX_QUEUED = 50
+/** Queued messages older than this are discarded rather than replayed. A chat turn
+ *  the user typed during an outage should not start a Claude session — one that can
+ *  stage trades — half an hour later, unprompted. */
+const QUEUE_TTL_MS = 30_000
+const RECONNECT_MIN_MS = 1_000
+const RECONNECT_MAX_MS = 30_000
+
 class Transport {
   private ws: WebSocket | null = null
-  private queue: ClientMsg[] = []
+  private queue: { msg: ClientMsg; at: number }[] = []
   private telemetrySubscribed = false
   private haSubscribed = false
   private osintSubscribed = false
@@ -34,6 +44,8 @@ class Transport {
   // Event listeners keyed by a "ch:type" string.
   private listeners = new Map<string, Set<Handler>>()
   private statusResolvers: ((s: any) => void)[] = []
+  private reconnectDelay = RECONNECT_MIN_MS
+  private connected = false
 
   connect(): void {
     const url = resolveWsUrl()
@@ -41,11 +53,17 @@ class Transport {
     this.ws = ws
 
     ws.onopen = () => {
+      this.connected = true
+      this.reconnectDelay = RECONNECT_MIN_MS // a good connection resets the backoff
+      this.emitLocal('connection', 'open', {})
       if (this.telemetrySubscribed) this.raw({ ch: 'telemetry', type: 'subscribe' })
       if (this.haSubscribed) this.raw({ ch: 'ha', type: 'subscribe' })
       if (this.osintSubscribed) this.raw({ ch: 'osint', type: 'subscribe' })
       if (this.archiveSubscribed) this.raw({ ch: 'archive', type: 'subscribe' })
-      for (const m of this.queue.splice(0)) this.raw(m)
+      // Replay only what is still fresh — see QUEUE_TTL_MS.
+      const now = Date.now()
+      const fresh = this.queue.splice(0).filter((q) => now - q.at < QUEUE_TTL_MS)
+      for (const q of fresh) this.raw(q.msg)
     }
     ws.onmessage = (e) => {
       let msg: ServerMsg
@@ -63,14 +81,44 @@ class Transport {
     }
     ws.onclose = () => {
       this.ws = null
-      setTimeout(() => this.connect(), 1500) // simple reconnect
+      const wasConnected = this.connected
+      this.connected = false
+      // Tell the app the socket died. Without this a turn that was mid-stream never
+      // receives its 'done'/'error', so useChat's `busy` latch stays set and the
+      // Computer Core is dead until a page reload — on an app designed to run for
+      // days, any transient blip bricked the chat.
+      if (wasConnected) {
+        this.emitLocal('connection', 'closed', {})
+        // Anything awaiting a status reply will never get one now.
+        this.statusResolvers.splice(0).forEach((r) => r(null))
+      }
+      // Capped exponential backoff with jitter. The old fixed 1.5s loop hammered a
+      // down remote node forever; jitter keeps several open tabs from retrying in
+      // lockstep.
+      const delay = Math.min(this.reconnectDelay, RECONNECT_MAX_MS)
+      this.reconnectDelay = Math.min(delay * 2, RECONNECT_MAX_MS)
+      setTimeout(() => this.connect(), delay + Math.random() * 250)
     }
     ws.onerror = () => ws.close()
   }
 
+  /** Dispatches a synthetic, client-side event to the same listener registry the
+   *  server's messages use, so hooks can subscribe to transport state uniformly. */
+  private emitLocal(ch: string, type: string, payload: Record<string, unknown>): void {
+    this.listeners.get(`${ch}:${type}`)?.forEach((h) => h({ ch, type, ...payload }))
+  }
+
+  isConnected(): boolean {
+    return this.connected
+  }
+
   private raw(msg: ClientMsg): void {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg))
-    else this.queue.push(msg)
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) { this.ws.send(JSON.stringify(msg)); return }
+    // Terminal keystrokes are worthless once the PTY behind them is gone — replaying
+    // them into a session id that no longer exists is noise at best.
+    if (msg.ch === 'term') return
+    this.queue.push({ msg, at: Date.now() })
+    if (this.queue.length > MAX_QUEUED) this.queue.splice(0, this.queue.length - MAX_QUEUED)
   }
 
   send(msg: ClientMsg): void {
@@ -169,7 +217,10 @@ export function installTransport(): void {
       t.markArchiveSubscribed()
       t.send({ ch: 'archive', type: 'subscribe' })
       return () => { offSnap(); offEvent() }
-    }
+    },
+    onDisconnect: (h) => t.on('connection', 'closed', () => h()),
+    onReconnect: (h) => t.on('connection', 'open', () => h()),
+    isConnected: () => t.isConnected(),
   }
 
   ;(window as any).homunculus = api

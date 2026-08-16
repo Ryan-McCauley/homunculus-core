@@ -7,7 +7,7 @@ dist/
 .env.local
 private/
 
-# Runtime data cache (surveil hub snapshots/history)
+# Runtime data cache (OSINT hub snapshots/history)
 data/
 
 # Private financial documents — bank statements etc. NEVER commit these.

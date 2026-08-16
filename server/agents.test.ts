@@ -84,15 +84,16 @@ vi.mock('./managerFile', () => ({ managerFile: managerFileMock }))
 vi.mock('./cryptoAlerts', () => ({ bindFleet: vi.fn() }))
 
 const claudeProcState = vi.hoisted(() => ({ wasStopped: false }))
-vi.mock('./claudeProcesses', () => ({
-  claudeProcesses: {
-    register: vi.fn(() => ({
-      controller: new AbortController(),
-      done: vi.fn(),
-      wasStopped: () => claudeProcState.wasStopped,
-    })),
-  },
+// Hoisted so tests can reach the exact controller handed to a given run — the
+// timeout-abort test asserts on its signal.
+const claudeProcMock = vi.hoisted(() => ({
+  register: vi.fn(() => ({
+    controller: new AbortController(),
+    done: vi.fn(),
+    wasStopped: () => claudeProcState.wasStopped,
+  })),
 }))
+vi.mock('./claudeProcesses', () => ({ claudeProcesses: claudeProcMock }))
 
 const sdk = vi.hoisted(() => ({ query: vi.fn() }))
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ query: sdk.query }))
@@ -310,6 +311,41 @@ describe('propose — trade authority gate', () => {
     expect(res).toEqual({ ok: false, outcome: 'refused', detail: 'unknown agent' })
   })
 
+  describe('per-agent propose key (AGT-02)', () => {
+    it('accepts an agent its own key and rejects another agent’s', async () => {
+      const { agentFleet } = await freshFleet()
+      agentFleet.create(newAgent({ name: 'Advisor', autonomy: 'advisory' }))
+      agentFleet.create(newAgent({ name: 'Trader', autonomy: 'auto', maxUsd: 100 }))
+      // Keys are not exposed through any view, so read them off the persisted record
+      // the same way the prompt builder does.
+      const persisted = storeState.data.get([...storeState.data.keys()][0]!) as {
+        agents: { agent: { id: string }; proposeKey: string }[]
+      }
+      const keyOf = (id: string) => persisted.agents.find((a) => a.agent.id === id)!.proposeKey
+
+      expect(agentFleet.verifyProposeKey('trader', keyOf('trader'))).toBe(true)
+      // The whole point: an advisory agent holding its own key cannot use the
+      // auto agent's URL to borrow its authority.
+      expect(agentFleet.verifyProposeKey('trader', keyOf('advisor'))).toBe(false)
+      expect(agentFleet.verifyProposeKey('trader', '')).toBe(false)
+      expect(agentFleet.verifyProposeKey('trader', 'guessed')).toBe(false)
+      expect(agentFleet.verifyProposeKey('nobody', keyOf('trader'))).toBe(false)
+    })
+
+    it('never exposes the key through a read route', async () => {
+      const { agentFleet } = await freshFleet()
+      agentFleet.create(newAgent({ name: 'Trader' }))
+      const persisted = storeState.data.get([...storeState.data.keys()][0]!) as {
+        agents: { proposeKey: string }[]
+      }
+      const key = persisted.agents[0]!.proposeKey
+      expect(key).toBeTruthy()
+      expect(JSON.stringify(agentFleet.list())).not.toContain(key)
+      expect(JSON.stringify(agentFleet.get('trader'))).not.toContain(key)
+      expect(JSON.stringify(agentFleet.roster())).not.toContain(key)
+    })
+  })
+
   it('refuses a malformed request without touching the exchange', async () => {
     const { agentFleet } = await freshFleet()
     agentFleet.create(newAgent({ name: 'Sentry', autonomy: 'auto' }))
@@ -324,6 +360,29 @@ describe('propose — trade authority gate', () => {
     agentFleet.create(newAgent({ name: 'Sentry', autonomy: 'auto' }))
     const res = await agentFleet.propose('sentry', { symbol: 'ETHUSD', side: 'buy', amount: '1', type: 'limit' })
     expect(res.detail).toMatch(/limit order needs a price/)
+  })
+
+  it('refuses a market order on a symbol with no live ticker instead of treating it as free', async () => {
+    // TRD-01 regression: an unknown/unseeded symbol used to fall back to a `last`
+    // of 0, so notional (px * amount) computed to 0 and sailed through both caps
+    // below — for an auto agent that meant an unbounded market order actually
+    // reaching the exchange. It must be refused before any cap check runs.
+    const { agentFleet } = await freshFleet()
+    agentFleet.create(newAgent({ name: 'Trader', autonomy: 'auto', maxUsd: 100 }))
+    cryptoMock.getSnapshot.mockReturnValue(emptySnapshot({ tickers: [] })) // no ticker for ETHUSD
+    const res = await agentFleet.propose('trader', req({ amount: '1000' }))
+    expect(res).toMatchObject({ ok: false, outcome: 'refused', detail: expect.stringMatching(/no live price/) })
+    expect(cryptoMock.addPending).not.toHaveBeenCalled()
+    expect(cryptoMock.executeTrade).not.toHaveBeenCalled()
+  })
+
+  it('refuses a non-positive or non-numeric amount even with a live price', async () => {
+    const { agentFleet } = await freshFleet()
+    agentFleet.create(newAgent({ name: 'Trader', autonomy: 'auto', maxUsd: 100 }))
+    cryptoMock.getSnapshot.mockReturnValue(emptySnapshot({ tickers: [{ symbol: 'ETHUSD', last: 2000 } as never] }))
+    const res = await agentFleet.propose('trader', req({ amount: '0' }))
+    expect(res).toMatchObject({ ok: false, outcome: 'refused', detail: expect.stringMatching(/positive number/) })
+    expect(cryptoMock.addPending).not.toHaveBeenCalled()
   })
 
   it('refuses every proposal from an advisory agent regardless of mandate', async () => {
@@ -356,6 +415,77 @@ describe('propose — trade authority gate', () => {
     expect(cryptoMock.executeTrade).toHaveBeenCalledWith('trade-1')
     const view = agentFleet.get('trader')!
     expect(view.decisions[0]).toMatchObject({ outcome: 'executed', symbol: 'ETHUSD' })
+  })
+
+  it('degrades to staged once an auto agent hits its rolling budget, even under its per-trade cap', async () => {
+    // TRD-02: maxUsd only ever bounded a SINGLE trade — an auto agent could otherwise
+    // auto-execute an unlimited number of under-cap trades back to back. The rolling
+    // budget is 10x the per-trade cap over 24h, computed from the agent's own decision
+    // history, so $100 maxUsd allows $1000 of auto-execution before the 11th $100
+    // trade — still comfortably under the per-trade cap — has to stage instead.
+    const { agentFleet } = await freshFleet()
+    agentFleet.create(newAgent({ name: 'Trader', autonomy: 'auto', maxUsd: 100 }))
+    cryptoMock.getSnapshot.mockReturnValue(emptySnapshot({ tickers: [{ symbol: 'ETHUSD', last: 2000 } as never] }))
+    cryptoMock.executeTrade.mockResolvedValue({ ok: true })
+    let n = 0
+    cryptoMock.addPending.mockImplementation(() => ({ id: `trade-${++n}` }))
+
+    // amount 0.05 @ 2000 = $100 notional, exactly at the per-trade cap.
+    for (let i = 0; i < 10; i++) {
+      const res = await agentFleet.propose('trader', req({ amount: '0.05' }))
+      expect(res.outcome).toBe('executed')
+    }
+    expect(cryptoMock.executeTrade).toHaveBeenCalledTimes(10)
+
+    const res = await agentFleet.propose('trader', req({ amount: '0.05' }))
+    expect(res.outcome).toBe('staged')
+    expect(res.detail).toMatch(/rolling budget/)
+    expect(cryptoMock.executeTrade).toHaveBeenCalledTimes(10) // the 11th did not execute
+  })
+
+  it('rolling budget survives the agent flushing its own decision log with junk proposals', async () => {
+    // AGT-04 regression. The budget used to be summed from rec.decisions, which is
+    // capped at 60 entries across ALL outcomes — so an agent near its cap could
+    // submit ~60 refused proposals (free, self-service), age its own executed rows
+    // out of the array, and win back a full budget. The spend ledger is trimmed by
+    // time only, so nothing the agent does can evict it.
+    const { agentFleet } = await freshFleet()
+    agentFleet.create(newAgent({ name: 'Trader', autonomy: 'auto', maxUsd: 100 }))
+    cryptoMock.getSnapshot.mockReturnValue(emptySnapshot({ tickers: [{ symbol: 'ETHUSD', last: 2000 } as never] }))
+    cryptoMock.executeTrade.mockResolvedValue({ ok: true })
+    let n = 0
+    cryptoMock.addPending.mockImplementation(() => ({ id: `trade-${++n}` }))
+
+    // Spend the whole $1000 rolling budget (10 × $100 cap).
+    for (let i = 0; i < 10; i++) {
+      expect((await agentFleet.propose('trader', req({ amount: '0.05' }))).outcome).toBe('executed')
+    }
+    // Now flood the decision log with refusals — each is a real, cheap proposal.
+    for (let i = 0; i < 70; i++) {
+      await agentFleet.propose('trader', { symbol: 'NOPEUSD', side: 'buy', amount: '1' })
+    }
+    // The executed rows are long gone from `decisions`…
+    const decisions = agentFleet.get('trader')!.decisions
+    expect(decisions.some((d) => d.outcome === 'executed')).toBe(false)
+    // …but the budget still knows what was spent.
+    const after = await agentFleet.propose('trader', req({ amount: '0.05' }))
+    expect(after.outcome).toBe('staged')
+    expect(after.detail).toMatch(/rolling budget/)
+    expect(cryptoMock.executeTrade).toHaveBeenCalledTimes(10)
+  })
+
+  it('releases the budget reservation when the exchange rejects the order', async () => {
+    const { agentFleet } = await freshFleet()
+    agentFleet.create(newAgent({ name: 'Trader', autonomy: 'auto', maxUsd: 100 }))
+    cryptoMock.getSnapshot.mockReturnValue(emptySnapshot({ tickers: [{ symbol: 'ETHUSD', last: 2000 } as never] }))
+    cryptoMock.addPending.mockReturnValue({ id: 'trade-x' })
+    cryptoMock.executeTrade.mockResolvedValue({ ok: false, error: 'insufficient funds' })
+    // Ten failed $100 attempts must not consume the $1000 budget.
+    for (let i = 0; i < 10; i++) {
+      expect((await agentFleet.propose('trader', req({ amount: '0.05' }))).outcome).toBe('refused')
+    }
+    cryptoMock.executeTrade.mockResolvedValue({ ok: true })
+    expect((await agentFleet.propose('trader', req({ amount: '0.05' }))).outcome).toBe('executed')
   })
 
   it('degrades an over-cap auto proposal to a staged confirmation instead of refusing it', async () => {
@@ -513,6 +643,27 @@ describe('start — execute() lifecycle', () => {
       expect(agentFleet.isRunning('stuck')).toBe(false)
       expect(agentFleet.get('stuck')!.status?.state).toBe('error')
       expect(agentFleet.get('stuck')!.status?.error).toBe('Run timed out.')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('ABORTS the SDK session on timeout instead of leaving it streaming', async () => {
+    // AGT-03 regression. The timeout used to free the concurrency slot without
+    // aborting, so the session kept running with full trade authority while the
+    // fleet started another agent — two bypassPermissions sessions at once, and
+    // the zombie's eventual completion overwrote the timeout's 'error'.
+    vi.useFakeTimers()
+    try {
+      const { agentFleet } = await freshFleet()
+      agentFleet.create(newAgent({ name: 'Stuck' }))
+      sdk.query.mockImplementation(() => hangingQuery())
+      agentFleet.start('stuck')
+      // The controller handed to the SDK for this run.
+      const controller = (claudeProcMock.register.mock.results[0]!.value as { controller: AbortController }).controller
+      expect(controller.signal.aborted).toBe(false)
+      await vi.advanceTimersByTimeAsync(10 * 60_000 + 1)
+      expect(controller.signal.aborted).toBe(true)
     } finally {
       vi.useRealTimers()
     }

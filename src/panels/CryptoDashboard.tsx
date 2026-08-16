@@ -3715,6 +3715,28 @@ export function CryptoDashboard() {
     }
   }, [chartSymbol])
 
+  /**
+   * Executes a staged trade and REPORTS THE OUTCOME.
+   *
+   * The bare `executeTrade(id).then(load)` this replaces discarded the server's
+   * `{ok, error}` and had no catch. When Gemini rejected an order — insufficient
+   * balance, below min size, expired key — the pending card simply vanished on the
+   * next poll (the server removes the pending entry before it calls the exchange),
+   * so a failed order was indistinguishable from a filled one. On real money, that
+   * is the worst possible way to fail. Every sibling action here already checks its
+   * result; this now matches them.
+   */
+  const runExecuteTrade = useCallback(async (id: string) => {
+    try {
+      const r = await executeTrade(id)
+      await load()
+      if (!r.ok) alert(`Trade failed: ${r.error ?? 'unknown error'}`)
+    } catch (e) {
+      await load().catch(() => {})
+      alert(`Trade failed: ${(e as Error).message}`)
+    }
+  }, [load])
+
   const onClosePositionSymbol = useCallback(async (symbol: string) => {
     const r = await closeSymbolPosition(symbol)
     await load()
@@ -3897,7 +3919,7 @@ export function CryptoDashboard() {
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                     {pending.map((t) => (
                       <PendingCard key={t.id} trade={t} ticker={tickerMap.get(t.symbol)}
-                        onExecute={() => executeTrade(t.id).then(load)}
+                        onExecute={() => runExecuteTrade(t.id)}
                         onDismiss={() => dismissTrade(t.id).then(load)}
                       />
                     ))}
@@ -3937,7 +3959,7 @@ export function CryptoDashboard() {
           planReports={snap.planReports ?? []}
           btcLadderAlerts={snap.btcLadderAlerts ?? []}
           btcLadderCycles={snap.btcLadderCycles ?? []}
-          onExecute={(id) => executeTrade(id).then(load)}
+          onExecute={(id) => runExecuteTrade(id)}
           onDismiss={(id) => dismissTrade(id).then(load)}
           onStaged={load}
           onCancelOrder={async (orderId) => { await cancelOpenOrder(orderId); await load() }}

@@ -13,6 +13,8 @@ import { bytesShort, uptimeShort } from './format'
 import { haHub } from './homeassistant'
 import { claudeProcesses } from './claudeProcesses'
 import { executeRoutine, executeHaCommand, routinesSummary } from './routines'
+import { claudeResultError } from './claudeResult'
+import { agentEnv } from './agentEnv'
 
 const MODEL = process.env['HOMUNCULUS_MODEL'] || ''
 
@@ -151,19 +153,22 @@ export function addProactiveListener(fn: ProactiveListener): () => void {
 /** Broadcast a proactive message to all clients (toast + voice) and the archive.
  *  `meta` lets callers classify the event for the ARCHIVE log; when omitted the
  *  archive falls back to SYSTEM / notice + a title derived from the text. */
+let proactiveSeq = 0
 export function broadcastProactive(text: string, meta?: ProactiveMeta): void {
-  const id = `pro_${Date.now()}`
-  for (const fn of _proactiveListeners) fn(id, text, meta)
-}
-
-// ── Chat env (no billed API key) ──────────────────────────────────────────
-
-function localEnv(): Record<string, string> {
-  const env: Record<string, string> = {}
-  for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v
-  delete env['ANTHROPIC_API_KEY']
-  delete env['ANTHROPIC_AUTH_TOKEN']
-  return env
+  // Date.now() alone collided when two events broadcast in the same millisecond
+  // (homewatch fires several per snapshot) — and the id keys the client's React
+  // list, so collisions dropped toasts.
+  const id = `pro_${Date.now()}_${proactiveSeq++}`
+  // One listener throwing must not stop the others from being notified, and must
+  // not propagate into the caller's interval — several callers are timer-driven,
+  // where an escaped exception terminates the process.
+  for (const fn of _proactiveListeners) {
+    try {
+      fn(id, text, meta)
+    } catch (err) {
+      console.error('[proactive] listener failed:', (err as Error).message)
+    }
+  }
 }
 
 // ── ChatSession (per WS connection) ───────────────────────────────────────
@@ -197,7 +202,7 @@ export class ChatSession {
           permissionMode: 'bypassPermissions',
           includePartialMessages: true,
           cwd: os.homedir(),
-          env: localEnv(),
+          env: agentEnv(),
           ...(this.sessionId ? { resume: this.sessionId } : {})
         }
       })
@@ -211,10 +216,8 @@ export class ChatSession {
             fullText += ev.delta.text
           }
         } else if (message.type === 'result') {
-          if (message.subtype !== 'success' || message.is_error) {
-            const detail = 'result' in message && message.result ? message.result : message.subtype
-            throw new Error(String(detail))
-          }
+          const failure = claudeResultError(message)
+          if (failure) throw new Error(failure)
         }
       }
 
@@ -237,6 +240,12 @@ export class ChatSession {
         msg = 'No local Claude session. Run `claude setup-token` and set CLAUDE_CODE_OAUTH_TOKEN.'
       }
       console.error('[chat] session failed:', msg)
+      // Drop the resumed session on failure. Keeping a corrupt or expired id meant
+      // every subsequent turn resumed the same broken conversation and failed the
+      // same way, with no path back short of a server restart. Starting fresh costs
+      // the conversation's context; not starting fresh costs the whole feature.
+      // (server/agents.ts does exactly this for agent chat turns.)
+      this.sessionId = null
       this.send({ ch: 'chat', type: 'error', id, message: msg })
     } finally {
       proc.done()
@@ -261,7 +270,6 @@ export class ProactiveMonitor {
   private prevStates: Record<string, string> = {}
   private debounceTimer: NodeJS.Timeout | null = null
   private lastFiredAt = 0
-  private sessionId: string | null = null
   private running = false
 
   start(): void {
@@ -337,14 +345,18 @@ export class ProactiveMonitor {
           permissionMode: 'bypassPermissions',
           includePartialMessages: false,
           cwd: os.homedir(),
-          env: localEnv(),
-          ...(this.sessionId ? { resume: this.sessionId } : {})
+          env: agentEnv(),
+          // Deliberately NOT resumed. Each check is self-contained — it is handed a
+          // full home-state snapshot and asked one question about it — so resuming
+          // bought nothing while appending every snapshot to one conversation that
+          // was never reset for the life of the process: unbounded context growth,
+          // rising cost and latency per check, and a session that once broken failed
+          // every subsequent check identically.
         }
       })
 
       let text = ''
       for await (const message of response) {
-        if ('session_id' in message && message.session_id) this.sessionId = message.session_id
         if (message.type === 'result' && 'result' in message && typeof message.result === 'string') {
           text = message.result.trim()
         }

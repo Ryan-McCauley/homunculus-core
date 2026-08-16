@@ -49,6 +49,11 @@ import {
 const AUDIT_DIR = join(process.cwd(), 'data', 'audit')
 const FILE_PATTERN = /^audit-\d{4}-\d{2}\.jsonl$/
 
+/** Ceiling on entries held in memory awaiting the Postgres mirror. Generous enough
+ *  to ride out a normal restart or a brief outage without dropping anything, small
+ *  enough that a multi-day outage cannot grow the heap without bound. */
+const MAX_DB_QUEUE = 10_000
+
 function monthKey(at: Date): string {
   return `${at.getUTCFullYear()}-${String(at.getUTCMonth() + 1).padStart(2, '0')}`
 }
@@ -88,9 +93,12 @@ class AuditLog {
   // ── Postgres ────────────────────────────────────────────────────────────
   private sql: ReturnType<typeof postgres> | null = null
   private dbError: string | null = null
-  /** Entries written to the file but not yet accepted by Postgres. */
+  /** Entries written to the file but not yet accepted by Postgres. Bounded — see
+   *  enqueueForDb; the file, not this, is what makes an entry durable. */
   private queue: AuditEntry[] = []
   private flushing = false
+  /** Latched so an overflowing backlog logs once, not once per entry. */
+  private queueOverflowed = false
 
   /**
    * Connects, applies the schema, and backfills anything the file has that the
@@ -294,16 +302,48 @@ class AuditLog {
     if (this.loaded) return
     this.loaded = true
     const files = this.files()
-    const newest = files[files.length - 1]
-    if (!newest) return
-    const { entries, torn } = this.readEntries(newest)
-    this.tornTail = torn
-    const last = entries[entries.length - 1]
+    if (!files.length) return
+
+    // Walk BACKWARDS to the newest file that yields a parseable entry.
+    //
+    // Reading only the newest file broke on one specific but entirely reachable
+    // case: the process dies mid-append of the FIRST entry of a new month. That
+    // file then holds nothing but a torn line, `last` is undefined, and the chain
+    // silently restarts at seq 1 with a genesis prevHash — forking the chain. The
+    // Postgres mirror makes it worse rather than catching it, because its insert is
+    // ON CONFLICT (seq) DO NOTHING: every new entry collides with last year's seq
+    // 1, 2, 3… and never lands, so the queryable record just stops growing.
+    //
+    // Still not a full-history verify (that is on-demand at /api/audit/verify, and
+    // deliberately not on the boot path) — this reads at most a few files, and only
+    // until one produces a usable chain head.
+    let newest = ''
+    let last: AuditEntry | undefined
+    for (let i = files.length - 1; i >= 0; i--) {
+      const file = files[i] as string
+      const { entries, torn } = this.readEntries(file)
+      if (i === files.length - 1) {
+        newest = file
+        this.tornTail = torn
+      }
+      const candidate = entries[entries.length - 1]
+      if (candidate) {
+        last = candidate
+        if (file !== newest) {
+          console.warn(
+            `[audit] ${newest} contained no parseable entry (killed mid-append at a month ` +
+            `boundary?). Recovered the chain head from ${file} instead — seq ${candidate.seq}.`
+          )
+        }
+        break
+      }
+    }
+
     if (last) {
       this.lastHash = last.hash
       this.lastSeq = last.seq
     }
-    if (torn) {
+    if (this.tornTail) {
       console.warn(
         `[audit] ${newest} ends in an unparseable line (process killed mid-append?). ` +
         `Chaining from seq ${this.lastSeq}; the torn line is left in place and verify() will report it.`
@@ -344,12 +384,47 @@ class AuditLog {
       appendFileSync(this.fileFor(at), JSON.stringify(entry) + '\n')
       this.lastHash = entry.hash
       this.lastSeq = entry.seq
-      this.queue.push(entry)
+      this.enqueueForDb(entry)
       void this.flush()
       return entry
     } catch (err) {
       console.error('[audit] failed to record entry', input.action, input.resource, err)
       return undefined
+    }
+  }
+
+  /**
+   * Queues an entry for the Postgres mirror — but only when there is a Postgres to
+   * mirror to.
+   *
+   * Two bugs lived in the unconditional `queue.push` this replaces. First, in the
+   * documented and supported file-only mode (DATABASE_URL unset) the queue was
+   * pushed to on every record() and drained by nothing, so a long-running server
+   * accumulated every audit entry it ever wrote in memory — and there is one per
+   * mutating API request. Second, even with a database configured, a queue that
+   * only ever grows during a long outage is a slow memory leak with no ceiling.
+   *
+   * Dropping the oldest when full is safe precisely because the FILE is the
+   * write-ahead log and is already durable: backfill() re-reads it on connect and
+   * fills whatever the table is missing. The queue is an optimization, never the
+   * record.
+   */
+  private enqueueForDb(entry: AuditEntry): void {
+    // No database configured or connected: the file is the whole story, and
+    // backfill() will catch the table up if one ever appears.
+    if (!this.sql) return
+    this.queue.push(entry)
+    if (this.queue.length > MAX_DB_QUEUE) {
+      const dropped = this.queue.length - MAX_DB_QUEUE
+      this.queue.splice(0, dropped)
+      if (!this.queueOverflowed) {
+        this.queueOverflowed = true
+        console.warn(
+          `[audit] Postgres backlog exceeded ${MAX_DB_QUEUE} entries — dropping the oldest from ` +
+          `the send queue. Nothing is lost: the file is the write-ahead log and backfill() ` +
+          `restores the table from it on the next successful connect.`
+        )
+      }
     }
   }
 
@@ -432,6 +507,13 @@ class AuditLog {
    * divergent — that is someone having got past the triggers, and it is the
    * signal worth waking up for. Entries the file has and the table does not are
    * merely `missing`: normally a flush backlog, not an attack.
+   *
+   * Rows the TABLE has and the file does not are `extra`, and they are the third
+   * thing worth waking up for. The append-only triggers block UPDATE and DELETE but
+   * necessarily permit INSERT, and read() serves rows from Postgres verbatim — so an
+   * inserted row displays in the AUDIT view as a genuine entry. Iterating file
+   * entries alone could never see one, which meant "tampering has to succeed in both
+   * copies" was untrue for the one operation the triggers allow.
    */
   private async verifyDb(): Promise<AuditVerifyResult['db']> {
     if (!this.sql) return undefined
@@ -445,19 +527,27 @@ class AuditLog {
           const stored = bySeq.get(entry.seq)
           if (stored === undefined) { missing++; continue }
           if (stored !== JSON.stringify(entry)) divergent.push(entry.seq)
+          bySeq.delete(entry.seq)   // consumed — whatever is left is not in any file
         }
       }
+      const extra = [...bySeq.keys()].sort((a, b) => a - b)
+      const reasons: string[] = []
+      if (divergent.length) {
+        reasons.push(`${divergent.length} row(s) in Postgres no longer match the file: seq ${divergent.slice(0, 10).join(', ')}`)
+      }
+      if (extra.length) {
+        reasons.push(`${extra.length} row(s) exist in Postgres with no entry in any file — inserted outside the log: seq ${extra.slice(0, 10).join(', ')}`)
+      }
       return {
-        ok: divergent.length === 0,
+        ok: divergent.length === 0 && extra.length === 0,
         rows: rows.length,
         missing,
         divergent,
-        ...(divergent.length
-          ? { reason: `${divergent.length} row(s) in Postgres no longer match the file: seq ${divergent.slice(0, 10).join(', ')}` }
-          : {}),
+        extra,
+        ...(reasons.length ? { reason: reasons.join('; ') } : {}),
       }
     } catch (err) {
-      return { ok: false, rows: 0, missing: 0, divergent: [], reason: (err as Error).message }
+      return { ok: false, rows: 0, missing: 0, divergent: [], extra: [], reason: (err as Error).message }
     }
   }
 

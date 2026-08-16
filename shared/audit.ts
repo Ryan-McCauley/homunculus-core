@@ -84,6 +84,13 @@ export interface AuditDbCheck {
   missing: number
   /** Seqs whose stored row no longer matches the file's entry — real tampering. */
   divergent: number[]
+  /**
+   * Seqs present in Postgres with no corresponding entry in any file — rows
+   * inserted outside the log. The append-only triggers block UPDATE and DELETE but
+   * must permit INSERT, so this is the one tampering route they cannot prevent and
+   * the only place it can be detected.
+   */
+  extra: number[]
   reason?: string
 }
 
@@ -131,21 +138,26 @@ export function deriveActor(raw: string | string[] | undefined): AuditActor {
 }
 
 /**
- * Whether a presented admin token matches the configured one.
+ * Constant-time string equality for comparing a presented secret against a
+ * configured one. Two rules, both load-bearing: an unconfigured secret ('')
+ * never matches, so a missing env var closes the gate rather than opening it;
+ * and the comparison is constant-time in the equal-length case, so a caller
+ * cannot learn the secret one byte at a time from response timings.
  *
- * Split out from the route so it can be tested without standing up a server.
- * Two rules, both load-bearing: an unconfigured token ('') never matches, so a
- * missing env var closes the gate rather than opening it; and the comparison is
- * constant-time in the equal-length case, so a caller cannot learn the secret
- * one byte at a time from response timings.
+ * Shared by every secret-bearing gate in the app — HOMUNCULUS_TOKEN,
+ * HOMUNCULUS_ADMIN_TOKEN, and the WS terminal-channel check — so none of them
+ * quietly regress to '===' the next time one is touched.
  */
-export function adminTokenMatches(provided: string, configured: string): boolean {
+export function constantTimeEquals(provided: string, configured: string): boolean {
   if (!configured) return false
   if (provided.length !== configured.length) return false
   let diff = 0
   for (let i = 0; i < configured.length; i++) diff |= provided.charCodeAt(i) ^ configured.charCodeAt(i)
   return diff === 0
 }
+
+/** @deprecated use {@link constantTimeEquals} — kept as an alias so existing call sites and tests don't churn. */
+export const adminTokenMatches = constantTimeEquals
 
 /**
  * Deterministic JSON with recursively sorted object keys.

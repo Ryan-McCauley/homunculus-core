@@ -31,7 +31,6 @@ import {
 } from 'node:fs'
 import { hostname } from 'node:os'
 import { dirname, join, relative, resolve, sep } from 'node:path'
-import { stateStore } from './stateStore'
 import { auditLog } from './auditLog'
 import {
   areaFor, defaultSyncConfig, diffManifests, isSafeRelPath, sanitizeSyncConfig,
@@ -63,7 +62,12 @@ function load(): PersistShape {
   if (cache) return cache
   let raw: unknown = {}
   try {
-    if (existsSync(CONFIG_FILE)) raw = stateStore.readJson<unknown>(CONFIG_FILE, {})
+    // Read the file directly rather than through stateStore. This config holds peer
+    // TOKENS, and stateStore is a Postgres-mirroring store — routing it through
+    // there would replicate every peer's credential into app_state (and thence into
+    // database backups). See the sync.json entry in stateStore's registerAllJson
+    // skip list, which closes the other half of the same hole.
+    if (existsSync(CONFIG_FILE)) raw = JSON.parse(readFileSync(CONFIG_FILE, 'utf8'))
   } catch (err) {
     console.warn('[sync] unreadable sync.json, starting fresh:', (err as Error).message)
   }
@@ -83,7 +87,12 @@ function persist(next: PersistShape): void {
   cache = next
   try {
     mkdirSync(DATA_DIR, { recursive: true })
-    stateStore.writeJson(CONFIG_FILE, next)
+    // File-only and atomic, for the reason in load(): peer tokens must not reach
+    // Postgres. temp+rename so a crash mid-write can't leave a torn config that
+    // would silently drop every configured peer on the next boot.
+    const tmp = `${CONFIG_FILE}.tmp-${process.pid}`
+    writeFileSync(tmp, JSON.stringify(next, null, 2))
+    renameSync(tmp, CONFIG_FILE)
   } catch (err) {
     console.warn('[sync] write failed:', (err as Error).message)
   }

@@ -25,7 +25,7 @@
     "release:patch": "npm version patch -m \"release: v%s\"",
     "release:minor": "npm version minor -m \"release: v%s\"",
     "release:major": "npm version major -m \"release: v%s\"",
-    "test:engine": "python3 -m unittest discover -t . -s engine",
+    "test:engine": "node scripts/run-engine-tests.mjs",
     "test:ts": "vitest run",
     "fixtures:parity": "tsx engine/tools/gen-parity-fixture.ts",
     "dist": "electron-vite build && electron-builder",
@@ -42,6 +42,7 @@
     "systeminformation": "^5.22.11",
     "three": "^0.185.0",
     "topojson-client": "^3.1.0",
+    "tsx": "^4.22.4",
     "world-atlas": "^2.0.2",
     "ws": "^8.21.0"
   },
@@ -62,7 +63,6 @@
     "electron-vite": "^2.3.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "tsx": "^4.22.4",
     "typescript": "^5.4.5",
     "vite": "^5.3.1",
     "vitest": "^4.1.10"

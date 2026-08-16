@@ -9,6 +9,8 @@ import { join } from 'node:path'
 import { auditLog, withActor } from './auditLog'
 import { claudeProcesses } from './claudeProcesses'
 import { stateStore } from './stateStore'
+import { claudeResultError } from './claudeResult'
+import { agentEnv } from './agentEnv'
 
 const MODEL = process.env['HOMUNCULUS_MODEL'] || ''
 
@@ -95,16 +97,19 @@ export interface StrategyRunStatus {
 // scheduled routine that crashes mid-way doesn't pin the "running" badge forever. The
 // hourly routine spans ~1–3 min between its first and last script, well under this.
 const EXTERNAL_RUN_TTL_MS = 6 * 60 * 1000
+/** Wall-clock ceiling on an in-process strategy run. Generous — these skills do real
+ *  multi-step analysis — but finite, because `state === 'running'` blocks every other
+ *  run until this one settles. Mirrors the agent fleet's RUN_TIMEOUT_MS. */
+const RUN_TIMEOUT_MS = 20 * 60_000
+/** Turn ceiling, matching the fleet's. Without one a looping session burns tokens
+ *  until the wall-clock timeout rather than failing fast. */
+const MAX_RUN_TURNS = 80
 
-function localEnv(strategy?: StrategyId): Record<string, string> {
-  const env: Record<string, string> = {}
-  for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v
-  delete env['ANTHROPIC_API_KEY']
-  delete env['ANTHROPIC_AUTH_TOKEN']
-  // The helper scripts under .claude/scripts read this to stamp their writes with
-  // an actor, so the audit log attributes them to the skill rather than to the operator.
-  if (strategy) env['HOMUNCULUS_SKILL'] = `skill:${strategy}`
-  return env
+/** The one extra, non-secret pair a strategy session needs: the helper scripts
+ *  under .claude/scripts read it to stamp their writes with an actor, so the
+ *  audit log attributes them to the skill rather than to the operator. */
+function skillEnv(strategy?: StrategyId): Record<string, string> {
+  return strategy ? { HOMUNCULUS_SKILL: `skill:${strategy}` } : {}
 }
 
 class StrategyRunner {
@@ -229,6 +234,17 @@ class StrategyRunner {
       kind: 'skill', label: STRATEGIES[this.strategy].label, component: `skill:${this.strategy}`,
       detail: 'strategy run', model: MODEL,
     })
+    // Unlike the agent fleet, a strategy run had neither a turn limit nor a deadline,
+    // so a wedged session held `state === 'running'` forever — and start() refuses
+    // while running, so every future manual AND scheduled run was blocked until an
+    // operator found the session in the Claude registry and stopped it by hand.
+    let timedOut = false
+    const timeout = setTimeout(() => {
+      if (this.state !== 'running') return
+      timedOut = true
+      proc.controller.abort()
+      console.error(`[strategy] run exceeded ${RUN_TIMEOUT_MS / 60_000} min — session aborted`)
+    }, RUN_TIMEOUT_MS)
     try {
       const response = query({
         prompt: STRATEGIES[this.strategy].prompt,
@@ -237,8 +253,9 @@ class StrategyRunner {
           abortController: proc.controller,
           permissionMode: 'bypassPermissions',
           includePartialMessages: true,
+          maxTurns: MAX_RUN_TURNS,
           cwd: process.cwd(),
-          env: localEnv(this.strategy)
+          env: agentEnv(skillEnv(this.strategy))
         }
       })
 
@@ -261,23 +278,30 @@ class StrategyRunner {
             if (line) this.activity = line.slice(0, 160)
           }
         } else if (message.type === 'result') {
-          if (message.subtype !== 'success' || message.is_error) {
-            const detail = 'result' in message && message.result ? message.result : message.subtype
-            throw new Error(String(detail))
-          }
+          const failure = claudeResultError(message)
+          if (failure) throw new Error(failure)
         }
       }
 
-      this.state = 'done'
-      this.activity = 'Strategy run complete.'
+      this.state = timedOut ? 'error' : 'done'
+      if (timedOut) this.error = 'Strategy run timed out.'
+      this.activity = timedOut ? 'Timed out.' : 'Strategy run complete.'
       this.endedAt = Date.now()
       this.trackRun()
     } catch (err) {
       let msg = err instanceof Error ? err.message : String(err)
       if (/401|authenticat|credential/i.test(msg)) {
         msg = 'No local Claude session. Run `claude setup-token` and set CLAUDE_CODE_OAUTH_TOKEN.'
+      } else if (/max_turns/i.test(msg)) {
+        msg = `Hit the ${MAX_RUN_TURNS}-turn limit before finishing.`
       }
-      if (proc.wasStopped()) {
+      // Checked before wasStopped(): the deadline aborts the same controller the
+      // operator's STOP does, so a timeout would otherwise report as a stop.
+      if (timedOut) {
+        this.state = 'error'
+        this.error = 'Strategy run timed out.'
+        this.activity = 'Timed out.'
+      } else if (proc.wasStopped()) {
         console.log('[strategy] run stopped by operator')
         this.state = 'done'
         this.activity = 'Stopped before completion.'
@@ -290,6 +314,7 @@ class StrategyRunner {
       this.endedAt = Date.now()
       this.trackRun()
     } finally {
+      clearTimeout(timeout)
       proc.done()
     }
   }

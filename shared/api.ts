@@ -49,4 +49,13 @@ export interface HomunculusApi {
   termKill(id: string): void
   onTermData(handler: (p: TermDataPayload) => void): () => void
   onTermExit(handler: (p: TermExitPayload) => void): () => void
+
+  /**
+   * Transport state. The socket dying mid-stream means any in-flight chat turn or
+   * terminal session will never receive its terminating message, so consumers need
+   * to hear about it rather than waiting forever on one that isn't coming.
+   */
+  onDisconnect(handler: () => void): () => void
+  onReconnect(handler: () => void): () => void
+  isConnected(): boolean
 }

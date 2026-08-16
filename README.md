@@ -84,10 +84,17 @@ Set `HOMUNCULUS_TOKEN`, run the backend, then browse to
 `http://<tailscale-ip>:8787/?token=<HOMUNCULUS_TOKEN>` from your phone.
 
 ### Docker
+Compose reads `.env`, so create one first — without it `docker compose` aborts with
+"env file not found":
 ```bash
-CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-... HOMUNCULUS_TOKEN=yoursecret \
-  docker compose up --build
+cp .env.example .env    # then fill in CLAUDE_CODE_OAUTH_TOKEN and HOMUNCULUS_TOKEN
+docker compose up --build
 ```
+The container publishes to `127.0.0.1:8787` only. To reach it from your phone, put
+it on the tailnet deliberately (`tailscale serve`, or bind the tailnet IP in
+`docker-compose.yml`) **and** set `HOMUNCULUS_TOKEN` — remote requests without one
+are refused.
+
 By default telemetry/terminal reflect the **container**. To monitor/shell the host,
 see the commented host-scope options in `docker-compose.yml`.
 

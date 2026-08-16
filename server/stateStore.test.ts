@@ -20,6 +20,14 @@ vi.mock('node:fs', () => ({
     return v
   }),
   writeFileSync: vi.fn((p: string, data: string) => { fsState.files.set(p, data) }),
+  // writeFile persists atomically (temp file + rename), so the fake filesystem has
+  // to model rename for the virtual store to end up with the real path.
+  renameSync: vi.fn((from: string, to: string) => {
+    const v = fsState.files.get(from)
+    if (v === undefined) throw new Error(`ENOENT: no such file, rename '${from}'`)
+    fsState.files.delete(from)
+    fsState.files.set(to, v)
+  }),
   mkdirSync: vi.fn(),
   rmSync: vi.fn((p: string) => { fsState.files.delete(p) }),
   // Directory walking (registerAllJson / importPlanReports) is exercised only

@@ -160,8 +160,12 @@ function createWindow(): void {
       // Still a pure web client for everything except the key vault, which
       // needs main-process privileges to reach the OS keychain. The preload
       // exposes nothing else, and refuses to work against a remote backend.
+      // sandbox restricts the renderer (and the preload running inside it) to
+      // Chromium's OS sandbox — safe here because preload.ts only ever touches
+      // contextBridge/ipcRenderer, both available under sandbox:true.
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
       preload: join(__dirname, '../preload/index.cjs')
     }
   })
@@ -191,6 +195,21 @@ function createWindow(): void {
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url)
     return { action: 'deny' }
+  })
+
+  // isLocalBackend() at module load only answers "is the vault bridge installed
+  // at all" — it says nothing about a navigation that happens after that. A
+  // redirect or an injected link (a compromised page, a misbehaving skill's
+  // markdown rendered somewhere unsafe) could otherwise carry this window to an
+  // arbitrary origin that still holds window.homunculusVault from the initial
+  // preload. Any in-page navigation away from the app's own origin is refused;
+  // external links already leave through setWindowOpenHandler above, not this.
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    try {
+      if (new URL(url).origin !== new URL(DEV_URL || PROD_URL).origin) event.preventDefault()
+    } catch {
+      event.preventDefault()
+    }
   })
 
   // The backend keeps keys in memory only, so every load is a chance to

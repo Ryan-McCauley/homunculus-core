@@ -108,7 +108,30 @@ describe('proactive listener registry', () => {
     const [id, text, meta] = a.mock.calls[0]!
     expect(text).toBe('washer done')
     expect(meta).toEqual({ source: 'HOME', severity: 'notice' })
-    expect(id).toMatch(/^pro_\d+$/)
+    expect(id).toMatch(/^pro_\d+_\d+$/)
+  })
+
+  it('gives every broadcast a distinct id even within the same millisecond', async () => {
+    // The id keys the client's React list; homewatch fires several events per
+    // snapshot, so a bare Date.now() collided and toasts were silently dropped.
+    const { addProactiveListener, broadcastProactive } = await freshChat()
+    const seen = vi.fn()
+    addProactiveListener(seen)
+    for (let i = 0; i < 5; i++) broadcastProactive(`event ${i}`)
+    const ids = seen.mock.calls.map((c) => c[0] as string)
+    expect(new Set(ids).size).toBe(5)
+  })
+
+  it('keeps notifying the remaining listeners when one throws', async () => {
+    // A listener that throws must not abort the fan-out, and must not escape into
+    // the caller — several callers are timer-driven, where that kills the process.
+    const { addProactiveListener, broadcastProactive } = await freshChat()
+    const boom = vi.fn(() => { throw new Error('listener exploded') })
+    const after = vi.fn()
+    addProactiveListener(boom)
+    addProactiveListener(after)
+    expect(() => broadcastProactive('still fine')).not.toThrow()
+    expect(after).toHaveBeenCalledTimes(1)
   })
 
   it('stops notifying a listener once unregistered', async () => {

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { adminTokenMatches, canonicalJson, deriveActor, GENESIS_HASH } from '../shared/audit'
 import type { AuditEntry } from '../shared/audit'
 
@@ -8,10 +8,15 @@ import type { AuditEntry } from '../shared/audit'
 // virtual filesystem. The mock is a plain path -> contents map implementing the
 // four fs calls auditLog.ts makes; appendFileSync concatenates, matching real
 // append semantics, which is what the chain-continuation tests depend on.
+//
+// Keys in the map come from join(), so on Windows they're backslash-separated —
+// existsSync/readdirSync below must split on the SAME separator (`sep`), not a
+// hardcoded '/', or a "directory contains this file" check never matches and
+// the log looks empty on every restart.
 const fsState = vi.hoisted(() => ({ files: new Map<string, string>(), failWrites: false }))
 
 vi.mock('node:fs', () => ({
-  existsSync: vi.fn((p: string) => fsState.files.has(p) || [...fsState.files.keys()].some((f) => f.startsWith(p + '/'))),
+  existsSync: vi.fn((p: string) => fsState.files.has(p) || [...fsState.files.keys()].some((f) => f.startsWith(p + sep))),
   readFileSync: vi.fn((p: string) => {
     const v = fsState.files.get(p)
     if (v === undefined) throw new Error(`ENOENT: ${p}`)
@@ -24,7 +29,7 @@ vi.mock('node:fs', () => ({
   mkdirSync: vi.fn(),
   readdirSync: vi.fn((dir: string) => (
     [...fsState.files.keys()]
-      .filter((f) => f.startsWith(dir + '/'))
+      .filter((f) => f.startsWith(dir + sep))
       .map((f) => f.slice(dir.length + 1))
   )),
 }))
@@ -204,6 +209,27 @@ describe('monthly rotation', () => {
     const next = restarted.auditLog.record({ ...sample, ts: '2026-08-02T00:00:00.000Z' })!
     expect(next.seq).toBe(3)
     expect(next.prevHash).toBe(august.hash)
+  })
+
+  it('recovers the chain head from an OLDER file when the newest holds only a torn line', async () => {
+    // STA-02 regression. Dying mid-append of the first entry of a new month left a
+    // file with no parseable entry; load() read only that file, found nothing, and
+    // silently restarted the chain at seq 1 with a genesis prevHash — a fork, and
+    // one that also stops every later entry from reaching Postgres (ON CONFLICT
+    // (seq) DO NOTHING collides with the original seq 1, 2, 3…).
+    const m = await freshModule()
+    m.auditLog.record({ ...sample, ts: '2026-07-30T12:00:00.000Z' })
+    const lastGood = m.auditLog.record({ ...sample, ts: '2026-07-31T12:00:00.000Z' })!
+
+    // A brand-new August file containing nothing but a half-written line.
+    fsState.files.set(fileFor('2026-08'), '{"seq":3,"ts":"2026-08-01T00:00:00.0')
+
+    vi.resetModules()
+    const restarted = await freshModule()
+    const next = restarted.auditLog.record({ ...sample, ts: '2026-08-01T01:00:00.000Z' })!
+    expect(next.seq).toBe(3)                  // continues, does NOT restart at 1
+    expect(next.prevHash).toBe(lastGood.hash) // and links to the real chain head
+    expect(next.prevHash).not.toBe(GENESIS_HASH)
   })
 })
 

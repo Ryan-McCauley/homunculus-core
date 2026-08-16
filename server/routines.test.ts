@@ -71,6 +71,38 @@ describe('executeHaCommand', () => {
     const res = await executeHaCommand('light.kitchen', 'light.turn_on', {})
     expect(res).toEqual({ ok: false, label: 'light.turn_on → light.kitchen', error: 'boom' })
   })
+
+  it('refuses a security-relevant service the model was never authorized to call', async () => {
+    // SEC-04: this is the model's own free-form exec block, not an operator action —
+    // a lock/alarm service must be refused before it ever reaches haHub.
+    const res = await executeHaCommand('lock.front_door', 'lock.unlock', {})
+    expect(res.ok).toBe(false)
+    expect(res.error).toMatch(/cannot call "lock" services/)
+    expect(ha.sendCommand).not.toHaveBeenCalled()
+  })
+
+  it('refuses any service domain not on the allowlist, not just locks', async () => {
+    const res = await executeHaCommand('alarm_control_panel.house', 'alarm_control_panel.alarm_disarm', {})
+    expect(res.ok).toBe(false)
+    expect(ha.sendCommand).not.toHaveBeenCalled()
+  })
+
+  it('gates the SERVICE domain, not the entity domain — a benign entity cannot smuggle a lock.unlock', async () => {
+    // The bypass: haHub.sendCommand routes by the service string, so an allowed
+    // entity domain ("switch") with a forbidden service ("lock.unlock") must
+    // still be refused. Gating entityId alone let this straight through.
+    const res = await executeHaCommand('switch.decoy', 'lock.unlock', {})
+    expect(res.ok).toBe(false)
+    expect(res.error).toMatch(/cannot call "lock" services/)
+    expect(ha.sendCommand).not.toHaveBeenCalled()
+  })
+
+  it('strips a data.entity_id override so the call cannot be redirected off the validated entity', async () => {
+    await executeHaCommand('switch.lamp', 'switch.turn_on', { entity_id: 'lock.front_door', brightness: 5 })
+    // sendCommand is called with the sanitized data (no entity_id key); the real
+    // sendCommand also re-asserts entity_id last as a second layer.
+    expect(ha.sendCommand).toHaveBeenCalledWith('switch.lamp', 'switch.turn_on', { brightness: 5 })
+  })
 })
 
 describe('routinesSummary', () => {

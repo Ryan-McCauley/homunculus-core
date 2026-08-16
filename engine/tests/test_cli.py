@@ -185,5 +185,33 @@ class TestPerformance(unittest.TestCase):
         self.assertLess(elapsed, 10.0, "full-universe scan took %.1fs" % elapsed)
 
 
+class TestJsonSafety(unittest.TestCase):
+    """stdout must always be parseable by JSON.parse on the Node side."""
+
+    def test_non_finite_values_never_reach_stdout(self):
+        # json.loads ACCEPTS these literals, so a job can carry them straight in —
+        # and an overflowed EMA can manufacture them internally. Either way, bare
+        # NaN/Infinity on stdout is invalid JSON and fails the whole scan rather
+        # than one symbol.
+        j = job(0, rsi={"enabled": True, "max": 90})
+        j["symbols"] = [{
+            "symbol": "NANUSD", "last": float("nan"), "change24h": float("inf"),
+            "volume24h": float("-inf"), "marketCap": 1e308,
+            "held": False, "candles": {"1hr": candles(n=60)},
+        }]
+        proc = run(json.dumps(j))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("NaN", proc.stdout)
+        self.assertNotIn("Infinity", proc.stdout)
+        json.loads(proc.stdout)  # strict parse: raises if the document is malformed
+
+    def test_json_safe_helper_maps_non_finite_to_none(self):
+        from engine.screener_engine import _json_safe
+        self.assertEqual(
+            _json_safe({"a": float("nan"), "b": [float("inf"), 1.5], "c": "ok"}),
+            {"a": None, "b": [None, 1.5], "c": "ok"},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

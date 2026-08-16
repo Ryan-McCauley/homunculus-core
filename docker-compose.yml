@@ -4,7 +4,12 @@ services:
     container_name: homunculus
     restart: unless-stopped
     ports:
-      - "8787:8787"
+      # Loopback-only by default. A bare "8787:8787" binds 0.0.0.0 and publishes
+      # the terminal, finance and trading API to every device on the LAN — the
+      # localhost waiver in the server does NOT cover those callers. To reach this
+      # from your phone, put it on the tailnet deliberately (`tailscale serve`, or
+      # bind the tailnet IP here) AND set HOMUNCULUS_TOKEN.
+      - "127.0.0.1:8787:8787"
     # All secrets/config come from .env (copy .env.example → .env first).
     # env_file passes every key through; the block below documents the ones
     # that matter most and supplies safe defaults where useful.
@@ -39,7 +44,10 @@ services:
     profiles: ["history"]
     environment:
       POSTGRES_USER: homunculus
-      POSTGRES_PASSWORD: homunculus
+      # No default on purpose: a password committed to the repo (and repeated in two
+      # docs) is one nobody ever changes. Compose refuses to start until it is set
+      # in .env, which is the only place it belongs.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: homunculus
     volumes:
       - homunculus-pg:/var/lib/postgresql/data

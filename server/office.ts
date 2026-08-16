@@ -16,7 +16,7 @@
 // This module holds no trading authority. It records who an employee is and what they
 // said; server/agents.ts decides what they are allowed to do.
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type {
@@ -34,6 +34,14 @@ const BOARD_FILE = join(OFFICE_DIR, 'board.json')
 // would be megabytes in a week. The .md mirror keeps the full history regardless.
 const MAX_MIND_KEPT = 400
 const MAX_JOURNAL_KEPT = 200
+/** trimJsonl rewrites the entire file, and think() is called on the streaming path
+ *  once per content block. Amortise it: the cap becomes a soft one (up to this many
+ *  rows over) in exchange for not paying a full read+rewrite per thought. */
+const MIND_TRIM_EVERY = 50
+/** Size at which a write-only markdown mirror rotates. One generation is kept. */
+const MAX_MIRROR_BYTES = 5 * 1024 * 1024
+/** Board threads retained. Resolved ones are dropped first — see pruneBoard. */
+const MAX_BOARD_THREADS = 500
 
 function agentDir(agentId: string): string {
   return join(OFFICE_DIR, agentId)
@@ -69,6 +77,8 @@ function ts(at: number): string {
 
 class Office {
   private board: BoardThread[] = []
+  /** Counts think() calls so the mind trim can be amortised — see MIND_TRIM_EVERY. */
+  private mindWrites = 0
 
   constructor() {
     this.loadBoard()
@@ -223,10 +233,28 @@ class Office {
     ensureDir(dir)
     const f = this.mindFile(agentId)
     appendFileSync(f, JSON.stringify(row) + '\n')
-    // Human-readable mirror. Never read back — see the file header.
-    appendFileSync(this.mindMarkdown(agentId), `- \`${ts(row.at)}\` **${row.kind}**${row.runId ? ` _(run ${row.runId.slice(0, 8)})_` : ''} — ${row.text}\n`)
-    trimJsonl(f, readJsonl<Thought>(f), MAX_MIND_KEPT)
+    // Human-readable mirror. Never read back — see the file header. Rotated rather
+    // than trimmed: it is append-only by design, but "forever" on a file written
+    // once per content block of every run is a disk leak, so it rolls over at a size
+    // and the previous generation is kept as .1.
+    const md = this.mindMarkdown(agentId)
+    appendFileSync(md, `- \`${ts(row.at)}\` **${row.kind}**${row.runId ? ` _(run ${row.runId.slice(0, 8)})_` : ''} — ${row.text}\n`)
+    this.rotateIfLarge(md)
+    // trimJsonl rewrites the whole file, so only do it when there is plausibly
+    // something to trim. This runs on the streaming path — every thought used to
+    // pay a full read + full rewrite once the file passed the cap.
+    if (++this.mindWrites % MIND_TRIM_EVERY === 0) {
+      trimJsonl(f, readJsonl<Thought>(f), MAX_MIND_KEPT)
+    }
     return row
+  }
+
+  /** Rolls a write-only mirror over at MAX_MIRROR_BYTES, keeping one generation. */
+  private rotateIfLarge(file: string): void {
+    try {
+      if (!existsSync(file) || statSync(file).size < MAX_MIRROR_BYTES) return
+      renameSync(file, `${file}.1`)   // replaces any previous .1
+    } catch { /* rotation is best-effort; never fail a thought over it */ }
   }
 
   // ── Message board ────────────────────────────────────────────────────────
@@ -276,9 +304,48 @@ class Office {
       messages: [msg]
     }
     this.board.unshift(thread)
+    this.pruneBoard()
     this.saveBoard()
     console.log(`[office] ${input.authorId} posted "${thread.title}"${msg.mentions.length ? ` @${msg.mentions.join(' @')}` : ''}`)
     return thread
+  }
+
+  /**
+   * Caps the board. Agents are instructed to post every run, the whole file is
+   * rewritten on every reply, and nothing ever removed a thread — so board.json grew
+   * without bound and every reply paid for the whole history.
+   *
+   * RESOLVED threads go first, oldest first: a closed conversation has served its
+   * purpose and the audit log holds the durable record either way. Only if the board
+   * is still over the cap on open threads alone does it drop the oldest of those.
+   */
+  private pruneBoard(): void {
+    let over = this.board.length - MAX_BOARD_THREADS
+    if (over <= 0) return
+
+    // Ranked by index as well as updatedAt, deliberately. `board` is newest-first
+    // (postThread unshifts), and a burst of posts inside one millisecond gives every
+    // thread the same updatedAt — sorting on that alone left the order arbitrary and
+    // could drop the thread just posted. Index breaks the tie by insertion recency,
+    // so "oldest" always means oldest.
+    const rank = new Map(this.board.map((t, i) => [t.id, i]))
+    const oldestFirst = (a: BoardThread, b: BoardThread): number =>
+      (a.updatedAt - b.updatedAt) || (rank.get(b.id)! - rank.get(a.id)!)
+
+    const drop = new Set<string>()
+    // Resolved threads go first at every age: a closed conversation has served its
+    // purpose, and the audit log holds the durable record either way.
+    for (const group of [this.board.filter((t) => t.resolved), this.board.filter((t) => !t.resolved)]) {
+      for (const t of [...group].sort(oldestFirst)) {
+        if (over <= 0) break
+        drop.add(t.id); over--
+      }
+      if (over <= 0) break
+    }
+    if (drop.size) {
+      this.board = this.board.filter((t) => !drop.has(t.id))
+      console.log(`[office] board pruned ${drop.size} thread(s) at the ${MAX_BOARD_THREADS} cap`)
+    }
   }
 
   reply(threadId: string, input: { body: string; authorId: string }, knownIds: string[]): BoardThread | null {

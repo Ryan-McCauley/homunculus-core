@@ -22,7 +22,7 @@
 // This is the same shape as server/auditLog.ts, for the same reason: a write that
 // only reaches a database that happens to be down is a write that did not happen.
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative, sep } from 'node:path'
 import postgres from 'postgres'
 import { canonicalJson } from '../shared/audit'
@@ -44,6 +44,9 @@ class StateStore {
   /** key -> latest value awaiting an upsert. Coalesced: only the newest matters. */
   private queue = new Map<string, unknown>()
   private flushing = false
+  /** Keys deleted locally whose Postgres DELETE has not yet been accepted. Retried
+   *  until it is — otherwise reconcile() restores the row on the next boot. */
+  private tombstones = new Set<string>()
   private divergent: string[] = []
 
   async start(): Promise<void> {
@@ -87,6 +90,9 @@ class StateStore {
 
   async stop(): Promise<void> {
     await this.flush().catch(() => {})
+    // Last chance for any delete that never landed — after this the process is gone
+    // and the next boot's reconcile would restore the row.
+    await this.flushTombstones().catch(() => {})
     await this.sql?.end({ timeout: 5 })
     this.sql = null
   }
@@ -125,6 +131,22 @@ class StateStore {
       if (!existsSync(file)) {
         this.writeFile(file, value)
         restored++
+        continue
+      }
+      // Present but unreadable: a torn write from a crash, or a hand-edit that broke
+      // the JSON. Treating this as "the file exists, nothing to do" was how a
+      // truncated file survived boot and then got persisted back over the good
+      // database row. The file has no usable content, so the row is strictly better
+      // — keep the corrupt bytes aside for forensics and restore from Postgres.
+      if (this.readFile(file) === undefined) {
+        const quarantine = `${file}.corrupt-${Date.now()}`
+        try { renameSync(file, quarantine) } catch { /* fall through and overwrite */ }
+        this.writeFile(file, value)
+        restored++
+        console.error(
+          `[state] ${key} was present but unparseable — restored from the database. ` +
+          `The unreadable file was kept at ${quarantine}. RESTART so hubs reload it.`
+        )
       }
     }
     for (const key of this.known) {
@@ -164,12 +186,27 @@ class StateStore {
     } catch { return undefined }
   }
 
+  /**
+   * Writes atomically: temp file, then rename.
+   *
+   * A bare writeFileSync truncates the target before it writes, so a crash or power
+   * loss mid-write leaves a TRUNCATED file. That is not merely a lost write here —
+   * it is a path to losing both copies. readJson would parse-fail and hand its hub
+   * the empty fallback; reconcile() would see a file present and skip restoring from
+   * Postgres; and the hub's next mutation would persist that empty state over BOTH
+   * the file and the database row. rename() within a filesystem is atomic, so a
+   * reader sees either the whole old file or the whole new one, never a torn one.
+   * server/sync.ts already wrote this way — the house store did not.
+   */
   private writeFile(file: string, value: unknown): void {
+    const tmp = `${file}.tmp-${process.pid}`
     try {
       mkdirSync(dirname(file), { recursive: true })
-      writeFileSync(file, JSON.stringify(value, null, 2))
+      writeFileSync(tmp, JSON.stringify(value, null, 2))
+      renameSync(tmp, file)
     } catch (e) {
       console.warn('[state] file write failed:', file, (e as Error).message)
+      try { if (existsSync(tmp)) rmSync(tmp, { force: true }) } catch { /* best effort */ }
     }
   }
 
@@ -210,18 +247,37 @@ class StateStore {
     this.known.delete(key)
     this.queue.delete(key)
     try { if (existsSync(file)) rmSync(file, { force: true }) } catch { /* already gone */ }
-    if (!this.sql) return
-    void (async () => {
+    // Remembered until Postgres confirms it. A fire-and-forget DELETE that fails —
+    // database down, connection dropped — used to leave the row behind, and the next
+    // boot's reconcile would then see "row, no file" and WRITE THE FILE BACK. That is
+    // the exact resurrection this method exists to prevent, reintroduced by an
+    // unreliable delete: closed brackets reappearing on restart as if still live.
+    this.tombstones.add(key)
+    void this.flushTombstones()
+  }
+
+  /** Retries pending deletes until the database accepts them. Called on delete, on
+   *  every flush, and at shutdown, so a delete issued during an outage still lands. */
+  private async flushTombstones(): Promise<void> {
+    if (!this.sql || !this.tombstones.size) return
+    for (const key of [...this.tombstones]) {
       try {
-        await this.sql!`DELETE FROM app_state WHERE key = ${key}`
+        await this.sql`DELETE FROM app_state WHERE key = ${key}`
+        this.tombstones.delete(key)
       } catch (err) {
-        console.error('[state] delete failed:', key, (err as Error).message)
+        // Keep it queued; the next flush or shutdown will try again.
+        console.error('[state] delete failed (will retry):', key, (err as Error).message)
+        return
       }
-    })()
+    }
   }
 
   private async flush(): Promise<void> {
-    if (!this.sql || this.flushing || !this.queue.size) return
+    if (!this.sql) return
+    // Pending deletes ride along with every flush, so a delete that failed during an
+    // outage retries as soon as anything else writes.
+    void this.flushTombstones()
+    if (this.flushing || !this.queue.size) return
     this.flushing = true
     try {
       while (this.queue.size) {
@@ -383,10 +439,21 @@ class StateStore {
    * megabytes wide and rewritten on every refresh, so mirroring it would be
    * constant churn to protect data that is one API call away. Same for .bak
    * files, which are snapshots someone took precisely to keep them out of the way.
+   *
+   * sync.json is excluded for a different and stronger reason: it holds this node's
+   * PEER TOKENS. shared/sync.ts states the invariant ("the token itself never
+   * leaves the server") and enforces it on the wire by excluding sync.json from
+   * peer sync — but mirroring it here would carry every peer's token into the
+   * app_state table, and from there into database backups and anyone with read
+   * access to the database, which is a strictly larger audience than "this server".
+   * server/sync.ts writes that file directly for the same reason.
    */
   private registerAllJson(): void {
     const skipDirs = new Set(['plan-reports', 'audit'])
-    const skipFiles = new Set(['candle-cache.json', 'closed-trades.json', 'portfolio-history.json'])
+    const skipFiles = new Set([
+      'candle-cache.json', 'closed-trades.json', 'portfolio-history.json',
+      'sync.json',   // peer tokens — see the note above
+    ])
     const walk = (dir: string): void => {
       for (const name of readdirSync(dir)) {
         const full = join(dir, name)

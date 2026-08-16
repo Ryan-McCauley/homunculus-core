@@ -6,7 +6,7 @@
 // Candle cache: persisted to disk so restarts skip re-seeding.
 
 import { createHmac, randomUUID } from 'crypto'
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, renameSync, rmSync } from 'fs'
 import { join } from 'path'
 import type {
   CryptoSnapshot, Ticker, Holding, Signal, SignalDirection, EntryQuality,
@@ -23,6 +23,7 @@ import { alertStore } from './cryptoAlerts'
 import { stateStore } from './stateStore'
 import { auditLog } from './auditLog'
 import { fetchCmcVolumes, cmcConfigured, type CmcVolumeRead } from './cmc'
+import { AGENT_MAX_USD_CEILING, isAgentStrategyId } from '../shared/agents'
 
 /** Fire a CRYPTO toast + archive record for a trade lifecycle event. Kept out of
  *  the ComputerCore conversation (chatLog:false) so fills don't spam the chat. */
@@ -334,6 +335,24 @@ async function avoidSelfCross(symbol: string, side: 'buy' | 'sell', price: strin
  *  away from it. That is the cost of not paying 1.2%, and it is the behaviour the operator chose. */
 const MAKER_ONLY: GeminiOrderOption[] = ['maker-or-cancel']
 
+/**
+ * Per-timeframe weights for the composite signal — the single source of truth.
+ *
+ * 4hr=40% is the heaviest tier: the strategy's primary decision timeframe (the operator
+ * 2026-07-05 — BB + volume on 4hr candles drive trade selection). 1day=30% anchors
+ * regime; 1hr=20% and 15m=10% are timing colour. 5m/1m exist only for portfolio
+ * holdings (see FAST_TIMEFRAMES) and add on top — totalWeight normalizes over
+ * whichever tiers are actually present.
+ *
+ * Exported as a constant because the intel report prints these in its footer, and
+ * that footer spent a long time quoting a stale set (1day=40 / 1hr=35 / 15m=25) that
+ * no longer matched the code. The report is read by the trading model, so a wrong
+ * footer is not a documentation nit — it tells the model the wrong hierarchy.
+ */
+const SIGNAL_WEIGHTS: Record<Timeframe, number> = {
+  '1day': 0.30, '4hr': 0.40, '1hr': 0.20, '15m': 0.10, '5m': 0.08, '1m': 0.05,
+}
+
 async function placeOrder(
   symbol: string, side: 'buy' | 'sell', amount: string,
   price?: string, stopPrice?: string, orderOptions?: GeminiOrderOption[],
@@ -610,6 +629,34 @@ async function cancelOrder(orderId: string): Promise<void> {
     const body = await res.text().catch(() => '')
     throw new Error(`cancelOrder ${res.status}: ${body}`)
   }
+}
+
+/** How long to wait after a verified cancel before spending the freed balance.
+ *  Gemini releases the locked funds asynchronously, so an immediate replacement can
+ *  be rejected for insufficient funds even though the cancel succeeded. */
+const BALANCE_RELEASE_MS = 1_500
+
+/**
+ * Cancel, confirm the order actually left the book, then wait for the balance.
+ *
+ * The planner has always done this (AutoPlanner.cancelOrder); the CryptoHub
+ * cancel-and-replace paths — closePosition, modifyOpenOrder, closeSymbolPosition,
+ * fireSafeMode — called the bare cancelOrder above and placed the replacement
+ * immediately. Both halves matter: Gemini can 200 a cancel while the order is still
+ * briefly live, and the freed balance lands later still. Getting either wrong leaves
+ * the replacement rejected and the position uncovered — which, for fireSafeMode,
+ * is precisely during the drop the stop exists for.
+ */
+async function cancelOrderVerified(orderId: string, waitForBalance = true): Promise<void> {
+  await cancelOrder(orderId)
+  try {
+    const s = await fetchOrderStatus(orderId)
+    if (s.is_live) throw new Error(`${orderId} still live after cancel`)
+  } catch (err) {
+    throw new Error(`cancel verify failed: ${(err as Error).message}`)
+  }
+  // Callers cancelling a batch skip the per-order wait and sleep once at the end.
+  if (waitForBalance) await sleep(BALANCE_RELEASE_MS)
 }
 
 // ── Indicator math ─────────────────────────────────────────────────────
@@ -1501,12 +1548,8 @@ function computeCompositeSignal(symbol: string, ticker: Ticker, tfSignals: Timef
     }
   }
 
-  // Weighted composite: 4hr=40% is the heaviest tier — the strategy's primary
-  // decision timeframe (operator directive 2026-07-05: BB + volume on 4hr candles drive trade
-  // selection). 1day=30% anchors regime, 1hr=20% and 15m=10% are timing color.
-  // 5m/1m only exist for portfolio holdings (see FAST_TIMEFRAMES) and add on top —
-  // totalWeight normalizes over whichever tiers are present.
-  const weights: Record<Timeframe, number> = { '1day': 0.30, '4hr': 0.40, '1hr': 0.20, '15m': 0.10, '5m': 0.08, '1m': 0.05 }
+  // Weighted composite — see SIGNAL_WEIGHTS for the values and the rationale.
+  const weights: Record<Timeframe, number> = SIGNAL_WEIGHTS
   let weightedScore = 0
   let totalWeight = 0
   for (const tf of tfSignals) {
@@ -2606,7 +2649,7 @@ ${gatedBody}
 
 ---
 *Indicators: RSI-14, StochRSI(14/14/3/3), MACD(12/26/9), Bollinger Bands(20,2σ), MA20/50/200, HMA-13, OBV + OBV(3/8) MA cross, ADX-14, VWAP, Ichimoku(9/26/52), Fibonacci, RSI Divergence, Candlestick Patterns, Capitulation Detection*
-*Signal weights: 1day=40%, 1hr=35%, 15m=25%*
+*Signal weights: 4hr=40%, 1day=30%, 1hr=20%, 15m=10% (see SIGNAL_WEIGHTS)*
 `
 }
 
@@ -2628,6 +2671,20 @@ const candleCache = new Map<string, CandleCache>()
 // off live fast-timeframe data instead of re-fetching the whole universe every run.
 let flashDipSelected: string[] = []
 export function getFlashDipSelected(): string[] { return flashDipSelected }
+
+/**
+ * A syntactically valid Gemini trading pair.
+ *
+ * Guards two things at once: path injection (the symbol is interpolated straight
+ * into the public candles URL, so `btcusd/../../v1/x` would steer the request) and
+ * unbounded cache growth (getCache mints a persistent entry per distinct string).
+ * Deliberately a shape check rather than a membership test against the live symbol
+ * list — a newly listed pair should work the moment Gemini has it, without waiting
+ * for our next universe refresh.
+ */
+function isValidSymbol(symbol: string): boolean {
+  return /^[A-Za-z0-9]{5,15}$/.test(symbol)
+}
 
 function getCache(symbol: string): CandleCache {
   if (!candleCache.has(symbol)) {
@@ -2820,10 +2877,31 @@ function classifyReport(report: string): { kind: PlanReportEntry['kind']; title:
   return null
 }
 
+/** How many archived reports to keep on disk. Interval-driven strategies can post
+ *  one every few minutes; without a cap the directory grows forever AND every
+ *  listArchivedPlanReports() call re-reads and re-parses all of it, synchronously,
+ *  on the setPlanReport hot path. 500 is comfortably more than the UI's last-10
+ *  view or a skill reaching back over past runs ever asks for. */
+const PLAN_REPORTS_KEEP = 500
+
 function archivePlanReport(report: string, at: number, kind: PlanReportEntry['kind'], title: string): void {
   if (!existsSync(PLAN_REPORTS_ARCHIVE_DIR)) mkdirSync(PLAN_REPORTS_ARCHIVE_DIR, { recursive: true })
   const file = join(PLAN_REPORTS_ARCHIVE_DIR, `report-${at}.json`)
-  writeFileSync(file, JSON.stringify({ report, at, kind, title }, null, 2))
+  writeFileAtomic(file, JSON.stringify({ report, at, kind, title }, null, 2))
+  prunePlanReportArchive()
+}
+
+/** Drops the oldest archived reports past PLAN_REPORTS_KEEP. Filenames carry the
+ *  timestamp, so this sorts by name and never needs to open a file. */
+function prunePlanReportArchive(): void {
+  try {
+    const files = readdirSync(PLAN_REPORTS_ARCHIVE_DIR)
+      .filter((f) => f.startsWith('report-') && f.endsWith('.json'))
+      .sort()
+    for (const f of files.slice(0, Math.max(0, files.length - PLAN_REPORTS_KEEP))) {
+      try { rmSync(join(PLAN_REPORTS_ARCHIVE_DIR, f), { force: true }) } catch { /* next time */ }
+    }
+  } catch { /* archive dir unreadable — nothing to prune */ }
 }
 
 /** List every archived full report (newest first). Legacy files predate the kind/title
@@ -2877,14 +2955,39 @@ function loadActiveBrackets(): Record<string, AutoStep> {
 // A bracket's realized P&L used to be logged to the activity feed and then discarded
 // when the bracket cleared. This appends a durable record per closed round-trip so
 // per-strategy win rate is an actual tracked number. Append-only, newest last.
-function loadClosedTrades(): ClosedTrade[] {
+/** Temp-file + rename, so a crash mid-write can never leave a torn file. Used for
+ *  the whole-file rewrites below: each one replaces the entire history, so a
+ *  truncated write is not a lost update but a lost ledger. */
+function writeFileAtomic(file: string, data: string): void {
+  const tmp = `${file}.tmp-${process.pid}`
   try {
-    if (existsSync(CLOSED_TRADES_FILE)) {
-      const raw = JSON.parse(readFileSync(CLOSED_TRADES_FILE, 'utf8'))
-      if (Array.isArray(raw)) return raw as ClosedTrade[]
-    }
-  } catch { /* ignore — treat a corrupt/missing ledger as empty */ }
-  return []
+    writeFileSync(tmp, data)
+    renameSync(tmp, file)
+  } catch (e) {
+    try { if (existsSync(tmp)) rmSync(tmp, { force: true }) } catch { /* best effort */ }
+    throw e
+  }
+}
+
+/**
+ * Reads the realized-P&L ledger.
+ *
+ * A corrupt ledger is NOT treated as empty: appendClosedTrade rewrites the whole
+ * file from whatever this returns, so answering `[]` to a parse failure would
+ * replace the entire trade history with a single trade on the very next close.
+ * Throwing instead makes the caller skip the rewrite and keep the bytes.
+ */
+function loadClosedTrades(): ClosedTrade[] {
+  if (!existsSync(CLOSED_TRADES_FILE)) return []
+  const raw = JSON.parse(readFileSync(CLOSED_TRADES_FILE, 'utf8'))
+  if (!Array.isArray(raw)) throw new Error('closed-trades ledger is not an array')
+  return raw as ClosedTrade[]
+}
+
+/** Same read, but for callers that only want to display the ledger and must not
+ *  fail because of it. Never feeds a write path. */
+function loadClosedTradesSafe(): ClosedTrade[] {
+  try { return loadClosedTrades() } catch { return [] }
 }
 
 function appendClosedTrade(t: ClosedTrade): void {
@@ -2893,7 +2996,7 @@ function appendClosedTrade(t: ClosedTrade): void {
     const all = loadClosedTrades()
     if (all.some((x) => x.id === t.id)) return  // idempotent: never double-record one bracket
     all.push(t)
-    writeFileSync(CLOSED_TRADES_FILE, JSON.stringify(all, null, 2))
+    writeFileAtomic(CLOSED_TRADES_FILE, JSON.stringify(all, null, 2))
     // The table is the queryable copy; the file stays as the local replica. One
     // INSERT rather than the 3MB rewrite above, which is why this one is a real
     // table instead of a JSONB blob in app_state.
@@ -3253,7 +3356,8 @@ function loadPortfolioHistory(): ValueSample[] {
 function savePortfolioHistory(series: ValueSample[]): void {
   ensureDir()
   void stateStore.savePortfolioHistory(series)
-  try { writeFileSync(PORTFOLIO_HISTORY_FILE, JSON.stringify(series)) }
+  // Atomic: this rewrites the entire series, so a torn write loses the history.
+  try { writeFileAtomic(PORTFOLIO_HISTORY_FILE, JSON.stringify(series)) }
   catch (e) { console.warn('[crypto] portfolio-history persist failed:', (e as Error).message) }
 }
 
@@ -3373,14 +3477,21 @@ class AutoPlanner {
 
   /** Best-effort USD notional of a step from its amountSpec — "USD:20" is exact; a base-unit
    *  amount needs a price. Returns 0 when it can't be determined rather than guessing, so an
-   *  unpriceable step never inflates a cap into blocking a legitimate trade. */
+   *  unpriceable step never inflates a cap into blocking a legitimate trade.
+   *
+   *  Staged bracket entry legs count too: this feeds per-strategy exposure, and a
+   *  bracket's committed capital is its primary entry plus every resting leg. */
   private notionalOf(step: AutoStep, price: number | null): number {
-    const spec = String(step.amountSpec || '')
-    const usdMatch = /^USD:([0-9.]+)$/i.exec(spec)
-    if (usdMatch) return Number(usdMatch[1]) || 0
-    const amount = Number(spec)
-    if (Number.isFinite(amount) && amount > 0 && price) return amount * price
-    return 0
+    const one = (raw: string): number => {
+      const usdMatch = /^USD:([0-9.]+)$/i.exec(raw)
+      if (usdMatch) return Number(usdMatch[1]) || 0
+      const amount = Number(raw)
+      if (Number.isFinite(amount) && amount > 0 && price) return amount * price
+      return 0
+    }
+    let total = one(String(step.amountSpec || ''))
+    for (const leg of step.bracket?.entry?.legs ?? []) total += one(String(leg.amountSpec || ''))
+    return total
   }
 
   onChange(cb: () => void): () => void {
@@ -3829,12 +3940,33 @@ class AutoPlanner {
         this.notify()
         await this.waitForFill(e, step)
       } else {
-        // Market order — allow 5s for settlement then confirm
+        // Market order — allow a moment for settlement, then READ what actually
+        // happened. The comment said "then confirm" but the code confirmed nothing:
+        // it slept 5s and asserted a full fill at the requested amount. An IOC market
+        // order can cancel unfilled or fill partially, and everything downstream
+        // (ladder cycle bookkeeping, later steps sized off filledAmount) then built
+        // on a quantity that never traded — a rebuy for BTC that was never sold.
         await sleep(5_000)
+        let executed = 0
+        let avgPrice: number | null = null
+        try {
+          const s = await fetchOrderStatus(orderId)
+          executed = Number(s.executed_amount) || 0
+          avgPrice = Number(s.avg_execution_price) || null
+        } catch (err) {
+          this.log(e, `  ⚠ Market order status read failed: ${(err as Error).message}`)
+          // Unknown, not assumed-good: fail the step rather than report a fill that
+          // may not exist. A halted plan is recoverable; a phantom fill is not.
+          throw new Error(`market order placed but its fill could not be confirmed: ${(err as Error).message}`)
+        }
+        if (executed <= 0) {
+          throw new Error('market order did not fill (cancelled or rejected by the exchange)')
+        }
         step.status = 'filled'
         step.filledAt = Date.now()
-        step.filledAmount = amount
-        this.log(e, `  ✓ Market order settled`)
+        step.filledAmount = String(executed)
+        const partial = Math.abs(executed - Number(amount)) / Math.max(Number(amount), 1e-12) > 0.01
+        this.log(e, `  ✓ Market order filled ${executed}${partial ? ` of ${amount} (PARTIAL)` : ''}${avgPrice ? ` @ $${avgPrice}` : ''}`)
       }
     } catch (err) {
       step.status = 'failed'
@@ -4267,15 +4399,88 @@ class AutoPlanner {
         await this.settleEntryLegs(e, step, spec, myRunId, deadline)
         return true
       }
-      if (s.is_cancelled) { this.failBracket(e, step, 'Entry cancelled on exchange'); return false }
+      if (s.is_cancelled) {
+        // A cancelled entry may still have filled part-way first. Abandoning it here
+        // left those coins held with no stop, no take-profit, no ledger entry, and
+        // nothing for safe mode to arm (there is no resting sell) — a silently naked
+        // position. Adopt whatever actually filled instead.
+        if (await this.adoptPartialEntry(e, step, spec, s, myRunId, deadline, 'Entry cancelled on exchange')) return true
+        return false
+      }
       if (Date.now() > deadline) {
         try { await this.cancelOrder(st.entryId!) }
         catch (err) { this.log(e, `  ⚠ Entry cancel may have failed — check Gemini for a stale ${spec.symbol} bid: ${(err as Error).message}`) }
-        this.failBracket(e, step, `Entry unfilled after ${spec.entry.timeStopMin}m — abandoned (no chase)`)
+        // Re-read after the cancel: the deadline can race a fill, and the status we
+        // polled up to 15s ago is not authoritative about what we now hold.
+        let after = s
+        try { after = await fetchOrderStatus(st.entryId!) } catch { /* keep the pre-cancel read */ }
+        if (await this.adoptPartialEntry(
+          e, step, spec, after, myRunId, deadline,
+          `Entry unfilled after ${spec.entry.timeStopMin}m — abandoned (no chase)`
+        )) return true
         return false
       }
     }
     return false
+  }
+
+  /**
+   * An entry that was cancelled — by the exchange, or by our own time-stop — may have
+   * filled part-way first. Adopt that partial as the bracket's position and protect
+   * it; only genuinely-nothing-filled entries fail the bracket.
+   *
+   * Returns true when a position was adopted (caller should treat the bracket as
+   * live), false when there was nothing to adopt and the bracket has been failed.
+   *
+   * Why this matters more than it looks: a partially-filled-then-abandoned entry
+   * leaves coins in the account that NOTHING is watching. There is no resting sell,
+   * so safe mode cannot arm one; the bracket is gone, so the monitor's stop/TP/
+   * time-stop never run; and no ClosedTrade is ever written, so the P&L ledger does
+   * not know the position exists. It just sits there until someone notices.
+   */
+  private async adoptPartialEntry(
+    e: PlanEntry,
+    step: AutoStep,
+    spec: BracketSpec,
+    s: Awaited<ReturnType<typeof fetchOrderStatus>>,
+    myRunId: number,
+    deadline: number,
+    failReason: string,
+  ): Promise<boolean> {
+    const st = step.bracketState!
+    const executed = Number(s.executed_amount) || 0
+    const avg = Number(s.avg_execution_price) || 0
+    const last = Number(cryptoHub.getSnapshot().tickers.find((t) => t.symbol === spec.symbol)?.last) || avg
+    // Below ~$1 of notional is exchange dust, not a position worth managing — and is
+    // usually unsellable anyway (min order size), so protecting it would only produce
+    // rejected orders every tick.
+    if (executed <= 0 || executed * (avg || last) < 1) {
+      this.failBracket(e, step, failReason)
+      return false
+    }
+
+    st.entryPrice = avg || last
+    st.filledAmount = executed
+    st.positionAmount = executed
+    try {
+      st.feeUsd = (st.feeUsd ?? 0) + await feeUsdForOrder(spec.symbol, st.entryId!)
+    } catch { /* fee lookup is reference-only; never block adopting the position */ }
+    st.filledAt = Date.now()
+    st.highWater = st.entryPrice
+    st.note = `Partial fill adopted: ${executed} @ $${st.entryPrice} (${failReason})`
+    this.log(e, `  ⚠ ${failReason} — but ${executed} ${spec.symbol.replace('USD', '')} had already filled. Adopting and protecting it.`)
+    cryptoToast(
+      `${spec.symbol.replace('USD', '')} partial entry adopted`,
+      `${executed} @ $${st.entryPrice} — stop/targets now managed`,
+      'warn', 'ti-target-arrow'
+    )
+    st.phase = 'protected'
+    await this.placeProtection(e, step, spec)
+    this.persistBracket(e.status.id, step); this.notify()
+    // Any staged lower legs are still resting against a plan that just lost its
+    // primary entry; settle them the same way a clean fill would.
+    await this.settleEntryLegs(e, step, spec, myRunId, deadline)
+    return true
   }
 
   /** "buy then immediately sell" mode is eligible only for a full-exit bracket — one
@@ -4283,6 +4488,27 @@ class AutoPlanner {
    *  coexist with a full-size resting stop (each locks the entire balance). */
   private tpFirstEligible(spec: BracketSpec): boolean {
     return !!spec.tpFirst && !spec.tp2 && spec.tp1.sizeFraction >= 1
+  }
+
+  /**
+   * How many base units THIS bracket may sell — its own position, never the wallet's.
+   *
+   * The distinction is the whole point. `fetchCurrencyTotal` is the account-wide
+   * balance of the coin, which includes long-term holdings the bracket never
+   * bought. Sizing an exit off it meant a $10 bracket on a coin you also hold 500
+   * of would place a resting sell for all 504 and then liquidate the remainder in
+   * finalizeBracket. placeProtection got this right (`Math.min(filledAmount, held)`)
+   * and the monitor loop overwrote it with the raw balance on every tick.
+   *
+   * The account balance still matters, as a CLAMP rather than a source: if the
+   * operator sold the coins by hand, or a leg TP already took some, the bracket
+   * cannot sell what is no longer there. Hence min() — and hence "position closed"
+   * is judged on this value too, so a bracket finishes when ITS position is gone
+   * rather than waiting for an unrelated long-term holding to disappear.
+   */
+  private bracketPosition(st: BracketState, held: number): number {
+    const own = st.positionAmount ?? st.filledAmount ?? held
+    return Math.max(0, Math.min(own, held))
   }
 
   private async placeProtection(e: PlanEntry, step: AutoStep, spec: BracketSpec): Promise<void> {
@@ -4303,7 +4529,7 @@ class AutoPlanner {
       st.tpTargetPrice = tpPrice                    // fixed target; staged legs grow the TP to it
       st.stopPrice = noStop ? null : stopTrigger   // monitored trigger only — never resting
       // Staged entries (entry.legs — the BB_SWING default) place a SINGLE resting TP that is
-      // grown as each additional leg fills (see growTpForStagedFills), so use a plain resting
+      // grown as each additional leg fills (see settleEntryLegs), so use a plain resting
       // sell here rather than placeStagedExit's higher-scaled exit legs, which don't compose
       // with a growing position. Non-staged brackets keep the full staged-exit behavior.
       const staged = !!st.entryLegs?.length
@@ -4609,11 +4835,15 @@ class AutoPlanner {
     st.stopId = st.tp1Id = st.tp2Id = null
     await sleep(1_500) // let Gemini release locked balance before selling
     const base = spec.symbol.replace('USD', '')
-    const held = await fetchCurrencyBalance(base)
+    const available = await fetchCurrencyBalance(base)
     const snap = cryptoHub.getSnapshot()
     const last = Number(snap.tickers.find((t) => t.symbol === spec.symbol)?.last ?? '0')
-    if (held * last >= 1) {
-      const r = await this.sellToUsd(spec.symbol, held)
+    // Sell only what this bracket is holding, clamped by what is actually free.
+    // Selling the raw balance here liquidated any long-term holding of the same
+    // coin the moment a $10 bracket hit its time-stop — see bracketPosition().
+    const toSell = this.bracketPosition(st, available)
+    if (toSell * last >= 1) {
+      const r = await this.sellToUsd(spec.symbol, toSell)
       if (st.entryPrice) st.realizedUsd += (r.avgPrice - st.entryPrice) * r.filled
       st.feeUsd = (st.feeUsd ?? 0) + r.feeUsd    // exit-side fee, reference only
     }
@@ -4705,7 +4935,9 @@ class AutoPlanner {
               // held-balance check / position time-stop close things out.
               const legTpsResting = (st.entryLegs ?? []).some((l) => l.tpId)
               if (legTpsResting) {
-                const heldAfter = await fetchCurrencyTotal(base)
+                // Clamped to this bracket's own position for the same reason as the
+                // monitor loop: a long-term holding of the coin is not ours to sell.
+                const heldAfter = this.bracketPosition(st, await fetchCurrencyTotal(base))
                 if (heldAfter * last >= 1) {
                   st.phase = 'exiting'
                   st.positionAmount = heldAfter
@@ -4801,7 +5033,9 @@ class AutoPlanner {
                   if (leg.tpId) { try { await this.cancelOrder(leg.tpId) } catch { /* ignore */ } leg.tpId = null; leg.tpDone = true }
                 }
                 await sleep(1_500) // let Gemini release the balance locked by the TP(s)
-                const heldNow = await fetchCurrencyTotal(base)
+                // This bracket's own position, clamped by the freed balance — not the
+                // wallet total, which would force-exit unrelated holdings of the coin.
+                const heldNow = this.bracketPosition(st, await fetchCurrencyTotal(base))
                 if (stopHit) {
                   // Exit via a stop-limit at the trigger (crosses to fill); the stop-fill
                   // detection at the top of the loop then finalizes.
@@ -4828,9 +5062,18 @@ class AutoPlanner {
       // Use TOTAL balance (incl. the amount locked in the resting stop) to judge whether
       // the position still exists — `available` is ~0 while protected and must not be
       // mistaken for a closed position.
+      //
+      // The balance CLAMPS this bracket's position; it does not define it. Assigning
+      // `held` straight into positionAmount here is what let a bracket's exits reach
+      // an unrelated long-term holding of the same coin — see bracketPosition().
       const held = await fetchCurrencyTotal(base)
-      st.positionAmount = held
-      if (held * last < 1) { await this.finalizeBracket(e, step, spec, 'position closed'); return }
+      st.positionAmount = this.bracketPosition(st, held)
+      // Everything below sizes and reports off THIS bracket's position, never the
+      // wallet's balance of the coin. Named apart from `held` on purpose: the two
+      // were the same identifier here, which is how the exits came to reach coins
+      // the bracket never bought.
+      const position = st.positionAmount
+      if (position * last < 1) { await this.finalizeBracket(e, step, spec, 'position closed'); return }
 
       // Self-heal a MISSING take-profit on a stopless bracket: if we're holding coins that
       // aren't covered by any resting sell (primary tp1Id gone AND no per-leg TP), re-place
@@ -4849,9 +5092,9 @@ class AutoPlanner {
       const scaleOutHeal = noStopScaleOut && st.phase === 'protected'
       if (spec.stopPct <= 0 && (tpFirstHeal || scaleOutHeal) && !st.tp1Id) {
         const targetPrice = st.tpTargetPrice ?? st.entryPrice! * (1 + spec.tp1.pricePct)
-        const wantAmt = this.tpFirstEligible(spec) ? held : held * spec.tp1.sizeFraction
+        const wantAmt = this.tpFirstEligible(spec) ? position : position * spec.tp1.sizeFraction
         const coveredByLegs = (st.entryLegs ?? []).reduce((s, l) => s + (l.tpId ? (l.filledAmount ?? 0) : 0), 0)
-        const uncovered = Math.min(wantAmt, held) - coveredByLegs
+        const uncovered = Math.min(wantAmt, position) - coveredByLegs
         if (uncovered * last >= 1) {
           st.tpTargetPrice = targetPrice
           st.tp1Id = await this.adoptOrPlaceTp1Sell(sym, uncovered, targetPrice)
@@ -4869,8 +5112,8 @@ class AutoPlanner {
       // "Scale-out at TP1" trigger below only fires when tp1Id was still null going in, which
       // it no longer is once the fix above starts pre-placing TP1 on fill).
       if (noStopScaleOut && spec.breakEvenAfterTp1 && st.phase === 'tp1_filled' && !st.stopId && !st.tp1Id) {
-        await this.placeStop(e, step, spec, st.entryPrice!, held)
-        st.note = `TP1 banked — remainder ${held.toFixed(6)} ${base} now stopped at breakeven $${st.entryPrice!.toFixed(6)}`
+        await this.placeStop(e, step, spec, st.entryPrice!, position)
+        st.note = `TP1 banked — remainder ${position.toFixed(6)} ${base} now stopped at breakeven $${st.entryPrice!.toFixed(6)}`
         this.persistBracket(e.status.id, step); this.notify()
       }
 
@@ -4878,7 +5121,7 @@ class AutoPlanner {
       // Skipped entirely when stopPct <= 0 (fast-cash take-profit-only mode — no stop ever).
       if (spec.stopPct > 0 && !st.stopId && !st.tp1Id && st.phase !== 'exiting') {
         const trig = st.stopPrice ?? st.entryPrice! * (1 - spec.stopPct)
-        await this.placeStop(e, step, spec, trig, held)
+        await this.placeStop(e, step, spec, trig, position)
       }
 
       if (st.highWater === null || last > st.highWater) st.highWater = last
@@ -4892,7 +5135,7 @@ class AutoPlanner {
       //    (scale-out, final exit, trailing ratchet, time-stop) but keep monitoring for
       //    fills and let the self-heal above keep the protective stop resting. ──
       if (st.locked) {
-        st.note = `🔒 Locked — holding ${held.toFixed(6)} ${base} @ $${last} | stop $${st.stopPrice?.toFixed(6) ?? '—'}`
+        st.note = `🔒 Locked — holding ${position.toFixed(6)} ${base} @ $${last} | stop $${st.stopPrice?.toFixed(6) ?? '—'}`
         this.persistBracket(e.status.id, step); this.notify()
         continue
       }
@@ -4900,8 +5143,8 @@ class AutoPlanner {
       // ── Scale-out at TP1 — a genuine resting limit, sized so the stop can stay live
       //    on the remainder the whole time (no naked window on the runner). ──
       if (!st.tp1Id && st.phase === 'protected' && spec.tp2 && last >= tp1Price) {
-        const sellAmt = held * spec.tp1.sizeFraction
-        const remainderAmt = held - sellAmt
+        const sellAmt = position * spec.tp1.sizeFraction
+        const remainderAmt = position - sellAmt
         this.log(e, `  🎯 TP1 trigger hit ($${last} ≥ $${tp1Price.toFixed(6)}) — placing resting limit sell @ ask $${ask} (never crosses the spread)`)
         // The stop is locking the coins this scale-out needs. If it won't cancel, do nothing
         // this tick — placing the TP1 sell anyway would fail on locked balance, and placing a
@@ -4930,8 +5173,8 @@ class AutoPlanner {
           continue
         }
         st.phase = 'exiting'
-        st.tp1Id = await this.placeStagedExit(e, step, spec, sym, held, ask)
-        st.note = `Final-target limit resting @ $${ask} for ${held.toFixed(6)} ${base}`
+        st.tp1Id = await this.placeStagedExit(e, step, spec, sym, position, ask)
+        st.note = `Final-target limit resting @ $${ask} for ${position.toFixed(6)} ${base}`
         this.persistBracket(e.status.id, step); this.notify()
         continue
       }
@@ -4943,7 +5186,7 @@ class AutoPlanner {
           this.log(e, `  ↗ Trailing stop: $${st.stopPrice.toFixed(6)} → $${desired.toFixed(6)}`)
           // Only ratchet when the old stop is confirmed off the book. A failed cancel leaves
           // it resting and still protecting; replacing it blind is what stacked duplicates.
-          if (await this.cancelStop(st)) await this.placeStop(e, step, spec, desired, held)
+          if (await this.cancelStop(st)) await this.placeStop(e, step, spec, desired, position)
           else this.log(e, `  ⚠ Trail ratchet deferred — stop cancel failed; old stop still resting, retrying next tick`)
         }
       }
@@ -4959,13 +5202,13 @@ class AutoPlanner {
           continue
         }
         st.phase = 'exiting'
-        st.tp1Id = await this.placeStagedExit(e, step, spec, sym, held, ask)
-        st.note = `Time-stop limit resting @ $${ask} for ${held.toFixed(6)} ${base}`
+        st.tp1Id = await this.placeStagedExit(e, step, spec, sym, position, ask)
+        st.note = `Time-stop limit resting @ $${ask} for ${position.toFixed(6)} ${base}`
         this.persistBracket(e.status.id, step); this.notify()
         continue
       }
 
-      st.note = `Holding ${held.toFixed(6)} ${base} @ $${last} | stop $${st.stopPrice?.toFixed(6) ?? '—'} | HWM $${st.highWater?.toFixed(6) ?? '—'}`
+      st.note = `Holding ${position.toFixed(6)} ${base} @ $${last} | stop $${st.stopPrice?.toFixed(6) ?? '—'} | HWM $${st.highWater?.toFixed(6) ?? '—'}`
       this.persistBracket(e.status.id, step); this.notify()
       } catch (err) {
         // Transient API/network error mid-cycle — the resting protective stop is untouched.
@@ -5352,16 +5595,34 @@ class AutoPlanner {
     return this.getAutoExecute()
   }
 
-  /** USD notional of a step given a price lookup. Returns Infinity when it can't be bounded
-   *  (ALL_USD, or a raw quantity with no known price) so the cap treats it as over-limit. */
-  private stepUsd(step: AutoStep, priceOf: (symbol: string) => number | null): number {
-    const spec = step.amountSpec || step.bracket?.entry?.amountSpec || ''
+  /** USD notional of a single amountSpec. Infinity when it can't be bounded (ALL_USD,
+   *  or a raw quantity with no known price) so the cap treats it as over-limit. */
+  private specUsd(spec: string, symbol: string, priceOf: (symbol: string) => number | null): number {
     if (/^USD:/i.test(spec)) { const n = Number(spec.slice(4)); return Number.isFinite(n) ? n : Infinity }
     if (/ALL_USD/i.test(spec)) return Infinity
     const qty = Number(spec)
     if (!Number.isFinite(qty) || qty <= 0) return Infinity
-    const price = priceOf(step.symbol)
+    const price = priceOf(symbol)
     return price && price > 0 ? qty * price : Infinity
+  }
+
+  /**
+   * Total USD this step commits, for the auto-execute cap.
+   *
+   * A staged bracket commits its primary entry AND every leg in `entry.legs` — they
+   * are resting buy orders placed by the same plan, on the same symbol, and they
+   * will all fill if price comes to them. Counting only the primary let a bracket
+   * staged as USD:15 + two USD:15 legs ($45 of committed capital) pass a $20 cap
+   * at $15 and auto-confirm with no human review. The cap is meant to bound what
+   * the plan can spend without asking, so it has to sum what the plan can spend.
+   */
+  private stepUsd(step: AutoStep, priceOf: (symbol: string) => number | null): number {
+    const entrySpec = step.amountSpec || step.bracket?.entry?.amountSpec || ''
+    let total = this.specUsd(entrySpec, step.symbol, priceOf)
+    for (const leg of step.bracket?.entry?.legs ?? []) {
+      total += this.specUsd(String(leg.amountSpec || ''), step.symbol, priceOf)
+    }
+    return total
   }
 
   /** The per-trade cap that applies to a step: BTC ladder trades (BTCUSD) use the BTC cap,
@@ -5531,7 +5792,9 @@ class CryptoHub {
   /** Closed-trade ledger (realized round-trips) + win-rate summary split by source
    *  (real banked vs backfilled paper), newest last. */
   getClosedTrades(): { trades: ClosedTrade[]; stats: ClosedTradeReport } {
-    const trades = loadClosedTrades()
+    // Read-only display path: a corrupt ledger degrades to empty here rather than
+    // failing the API call. The write path deliberately does NOT (see loadClosedTrades).
+    const trades = loadClosedTradesSafe()
     return { trades, stats: computeClosedTradeReport(trades) }
   }
   getCandles(symbol: string, tf: Timeframe): Candle[] {
@@ -5598,6 +5861,12 @@ class CryptoHub {
   /** On-demand fresh candles for a single symbol+tf. Refetches from Gemini
    *  (throttled) so an open chart stays live regardless of seed age. */
   async getCandlesFresh(symbol: string, tf: string): Promise<Candle[]> {
+    // Validate before the string reaches a URL or the cache. refreshCandle
+    // interpolates it into `${GEMINI_REST}/v2/candles/${symbol}/…`, so an input like
+    // "btcusd/../../v1/x" steers the request elsewhere on the API host; and getCache()
+    // mints a permanent cache entry per distinct string, which then gets persisted —
+    // an unbounded map keyed by whatever a caller sends.
+    if (!isValidSymbol(symbol)) return []
     const timeframe: Timeframe =
       tf === '15m' || tf === '1hr' || tf === '4hr' || tf === '1day' || tf === '5m' || tf === '1m' ? tf : '1hr'
     const fresh = await refreshCandle(symbol, timeframe)
@@ -5850,18 +6119,28 @@ class CryptoHub {
     }
 
     let cycle = 0
+    // The whole body is guarded. fullRefresh/tickerRefresh reach the exchange and
+    // rebuildIntelReport makes a great many assumptions about data shape; an escaped
+    // rejection here is an unhandled rejection, which by default terminates Node —
+    // taking down the bracket monitor and alert evaluation with real orders resting
+    // on the exchange. The inner try/catches below stay: they let one subsystem fail
+    // without skipping the others in the same tick.
     this.refreshTimer = setInterval(async () => {
-      cycle++
-      if (cycle % 10 === 0) await this.fullRefresh()
-      else await this.tickerRefresh()
-      // Self-heal any bracket whose monitor loop stalled on a transient API error —
-      // re-attaches management within ~30s, no restart needed (position stayed protected).
-      if (this.snapshot.keysConfigured) {
-        try { autoPlanner.reviveStalledBrackets() } catch (e) { console.warn('[crypto] bracket revive failed:', (e as Error).message) }
+      try {
+        cycle++
+        if (cycle % 10 === 0) await this.fullRefresh()
+        else await this.tickerRefresh()
+        // Self-heal any bracket whose monitor loop stalled on a transient API error —
+        // re-attaches management within ~30s, no restart needed (position stayed protected).
+        if (this.snapshot.keysConfigured) {
+          try { autoPlanner.reviveStalledBrackets() } catch (e) { console.warn('[crypto] bracket revive failed:', (e as Error).message) }
+        }
+        // MARKET indicator alerts. Evaluated here rather than in the browser so they
+        // keep firing with the app closed; the store dedups to one fire per bar.
+        try { this.evaluateAlerts() } catch (e) { console.warn('[crypto] alert eval failed:', (e as Error).message) }
+      } catch (e) {
+        console.error('[crypto] refresh cycle failed:', (e as Error).message)
       }
-      // MARKET indicator alerts. Evaluated here rather than in the browser so they
-      // keep firing with the app closed; the store dedups to one fire per bar.
-      try { this.evaluateAlerts() } catch (e) { console.warn('[crypto] alert eval failed:', (e as Error).message) }
     }, 30_000)
 
     // Hot loop: re-price just the user's open positions/orders every ~7s so open
@@ -6280,6 +6559,32 @@ class CryptoHub {
     const trade = this.snapshot.pending.find((t) => t.id === id)
     if (!trade) return { ok: false, error: 'trade not found' }
     this.removePending(id)
+
+    // Defense in depth for agent-originated trades. agents.ts's propose() is the
+    // primary gate and already refuses an unpriced or over-cap trade before it
+    // ever reaches the pending queue — but this is the last point before real
+    // money moves, and the only one a bug anywhere upstream of propose() (a
+    // stale pending entry, a future caller of addPending that forgets the gate)
+    // cannot route around. Non-agent trades — the operator's own manual stages
+    // — are deliberately uncapped here, exactly as they always have been; only
+    // trades carrying an agent's strategy id are re-checked.
+    if (isAgentStrategyId(trade.strategy)) {
+      const last = Number(this.snapshot.tickers.find((t) => t.symbol === trade.symbol)?.last) || 0
+      const px = Number(trade.price) || last
+      const amountNum = Number(trade.amount)
+      const notional = px * amountNum
+      const overCap = !(px > 0) || !Number.isFinite(amountNum) || amountNum <= 0 || notional > AGENT_MAX_USD_CEILING
+      if (overCap) {
+        const error = !(px > 0)
+          ? `no live price for ${trade.symbol} — refusing to execute an agent trade with unknown notional`
+          : `$${notional.toFixed(2)} exceeds the global agent ceiling of $${AGENT_MAX_USD_CEILING}`
+        const record: TradeRecord = { ...trade, status: 'failed', settledAt: Date.now(), error }
+        this.trades.push(record)
+        saveTrades(this.trades)
+        return { ok: false, error }
+      }
+    }
+
     try {
       const orderId = await placeOrder(
         trade.symbol, trade.side, trade.amount,
@@ -6392,7 +6697,7 @@ class CryptoHub {
 
   async cancelOpenOrder(orderId: string): Promise<{ ok: boolean; error?: string }> {
     try {
-      await cancelOrder(orderId)
+      await cancelOrderVerified(orderId, false)
       // Remove from local openOrders immediately; next refresh will confirm
       this.snapshot = {
         ...this.snapshot,
@@ -6428,7 +6733,7 @@ class CryptoHub {
     if (!(px > 0)) return { ok: false, error: 'no current price for symbol' }
 
     try {
-      await cancelOrder(orderId)
+      await cancelOrderVerified(orderId)
       this.snapshot = {
         ...this.snapshot,
         openOrders: this.snapshot.openOrders.filter((o) => o.orderId !== orderId),
@@ -6507,7 +6812,7 @@ class CryptoHub {
     const cancelledOrderIds: string[] = []
     for (const o of orders) {
       try {
-        await cancelOrder(o.orderId)
+        await cancelOrderVerified(o.orderId, false)
         cancelledOrderIds.push(o.orderId)
       } catch (e) {
         return { ok: false, error: `cancel failed for ${o.orderId}: ${(e as Error).message}`, cancelledOrderIds }
@@ -6519,6 +6824,11 @@ class CryptoHub {
         openOrders: this.snapshot.openOrders.filter((o) => o.symbol !== sym),
       }
       this.broadcast()
+      // One wait for the whole batch (each cancel above skipped its own). Without it
+      // `available` below is read while Gemini is still releasing the funds those
+      // orders locked, so the sell is sized short and silently closes only part of
+      // the position.
+      await sleep(BALANCE_RELEASE_MS)
     }
 
     const base = sym.replace('USD', '')
@@ -6577,7 +6887,7 @@ class CryptoHub {
     }
 
     try {
-      await cancelOrder(orderId)
+      await cancelOrderVerified(orderId)
       this.snapshot = {
         ...this.snapshot,
         openOrders: this.snapshot.openOrders.filter((o) => o.orderId !== orderId),
@@ -6742,16 +7052,56 @@ class CryptoHub {
     return { ids, symbols }
   }
 
+  /**
+   * Every order id currently owned by a LIVE bracket, whatever strategy staged it.
+   *
+   * Safe mode and the bracket monitor are two independent controllers. If safe mode
+   * arms an order the monitor also manages, they fight: safe mode cancels and
+   * re-lists near market, the monitor sees `is_cancelled`, nulls its tp1Id/stopId
+   * and self-heals a replacement against a balance safe mode has partly locked.
+   * The observed outcomes were a position left UNPROTECTED with the single-shot arm
+   * already consumed, a fill safe mode never credited (so the closed-trade ledger
+   * recorded the wrong realizedUsd), and duplicate-sell churn every 20s.
+   *
+   * fastCashGuard() below covers only the stopless tracks and only four id fields.
+   * This covers every bracket and every field that can hold a resting order —
+   * including per-leg entry TPs and staged exit legs, which the narrower guard
+   * missed entirely.
+   */
+  private bracketOwnedOrderIds(): Set<string> {
+    const ids = new Set<string>()
+    for (const plan of autoPlanner.getAllStatuses()) {
+      for (const step of plan.steps) {
+        const bs = step.bracketState
+        if (!bs) continue
+        // A finished bracket owns nothing; leaving its ids in would permanently
+        // exclude recycled order ids from protection.
+        if (bs.phase === 'flat') continue
+        for (const id of [bs.entryId, bs.stopId, bs.tp1Id, bs.tp2Id]) if (id) ids.add(id)
+        for (const leg of bs.entryLegs ?? []) {
+          if (leg.orderId) ids.add(leg.orderId)
+          if (leg.tpId) ids.add(leg.tpId)
+        }
+        for (const leg of bs.exitLegs ?? []) if (leg.orderId) ids.add(leg.orderId)
+      }
+    }
+    return ids
+  }
+
   /** Default-on: auto-arm every eligible resting SELL order that isn't already armed and
    *  hasn't been explicitly disarmed. Uses the default stop/exit levels. FAST_CASH and
-   *  OVERSOLD orders are excluded — those tracks run stopless by design. */
+   *  OVERSOLD orders are excluded — those tracks run stopless by design — as is any
+   *  order a live bracket is already managing (see bracketOwnedOrderIds). */
   private autoArmSafeMode(): void {
     const fastCash = this.fastCashGuard()
+    const bracketOwned = this.bracketOwnedOrderIds()
     for (const o of this.snapshot.openOrders) {
       if (o.side !== 'sell') continue
       // stopless tracks — never default-arm any of their orders (by id or by symbol,
       // so the position time-stop re-sell and pre-persist windows are covered too).
       if (fastCash.ids.has(o.orderId) || fastCash.symbols.has(o.symbol.toUpperCase())) continue
+      // Already has a controller: the bracket monitor manages its own stop/TP legs.
+      if (bracketOwned.has(o.orderId)) continue
       if (this.safeModeOptOut.has(o.orderId)) continue
       if (this.snapshot.safeMode.some((a) => a.orderId === o.orderId)) continue
       if (this.currentPrice(o.symbol) === null) continue  // retry next refresh once priced
@@ -6789,7 +7139,7 @@ class CryptoHub {
     if (!(Number(amount) > 0)) return
 
     try {
-      await cancelOrder(arm.orderId)
+      await cancelOrderVerified(arm.orderId)
       this.snapshot = {
         ...this.snapshot,
         openOrders: this.snapshot.openOrders.filter((o) => o.orderId !== arm.orderId),

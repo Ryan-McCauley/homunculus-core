@@ -109,6 +109,9 @@ class AlertStore {
   /** Previous signal-engine reading per symbol, for the flip/quality conditions —
    *  the signal snapshot has no history of its own to diff against. */
   private prevSignal = new Map<string, { direction: string; quality: string; confluence: number }>()
+  /** Readings observed during the pass currently running, merged into prevSignal
+   *  only once every alert has been tested against the same baseline. */
+  private pendingSignal = new Map<string, { direction: string; quality: string; confluence: number }>()
 
   list(): CryptoAlert[] {
     // Strip the engine-internal dedup stamp before it reaches the client.
@@ -218,6 +221,14 @@ class AlertStore {
     if (!this.alerts.length) return
     let dirty = false
 
+    // Signal readings are diffed against the PREVIOUS pass, so the baseline has to
+    // stay fixed for the whole of this one. testSignal used to write straight into
+    // prevSignal as it went, which meant the first alert on a symbol consumed the
+    // transition and every later alert on that same symbol compared cur against cur
+    // — two alerts on BTCUSD and only the first could ever fire, even when they
+    // watched different fields. Updates are staged here and merged after the loop.
+    this.pendingSignal = new Map()
+
     for (const alert of this.alerts) {
       if (!alert.armed) continue
       let verdict: Verdict
@@ -243,6 +254,11 @@ class AlertStore {
 
       this.fire(alert, verdict, ctx)
     }
+
+    // Now that every alert has been tested against the same baseline, this pass's
+    // readings become the next pass's baseline.
+    for (const [sym, reading] of this.pendingSignal) this.prevSignal.set(sym, reading)
+    this.pendingSignal = new Map()
 
     if (dirty) save(this.alerts)
   }
@@ -482,7 +498,9 @@ class AlertStore {
     const key = alert.symbol
     const prev = this.prevSignal.get(key)
     const cur = { direction: dirToken(sig.direction), quality: sig.entryQuality, confluence: sig.confluence }
-    this.prevSignal.set(key, cur)
+    // Staged, not applied: prevSignal must stay put until every alert in this pass
+    // has been compared against it. See evaluate().
+    this.pendingSignal.set(key, cur)
     if (!prev) return NOT_FIRED   // first observation has nothing to compare against
 
     if (alert.condition === 'direction-flips') {

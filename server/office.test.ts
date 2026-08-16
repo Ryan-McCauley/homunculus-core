@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 
 // office.ts keeps one file-per-employee (personnel.json, journal.jsonl, mind.jsonl,
 // mind.md) plus a single board.json, split across stateStore (JSON files) and raw
@@ -28,14 +28,17 @@ function allKnownPaths(): string[] {
 }
 
 /** Direct child basenames of `dir` across both virtual stores — one level down only,
- *  which is what readdirSync would return for a real directory. */
+ *  which is what readdirSync would return for a real directory. Paths in both virtual
+ *  stores come from join(), so on Windows they're backslash-separated — this must
+ *  split on the SAME separator (`sep`), not a hardcoded '/', or every directory looks
+ *  empty and listPersonnel() silently returns nothing. */
 function childrenOf(dir: string): string[] {
-  const prefix = dir.endsWith('/') ? dir : dir + '/'
+  const prefix = dir.endsWith(sep) ? dir : dir + sep
   const seen = new Set<string>()
   for (const p of allKnownPaths()) {
     if (!p.startsWith(prefix)) continue
     const rest = p.slice(prefix.length)
-    const seg = rest.split('/')[0]
+    const seg = rest.split(sep)[0]
     if (seg) seen.add(seg)
   }
   return [...seen]
@@ -327,12 +330,33 @@ describe('mind: readMind / think', () => {
     expect(office.readMind('agent-a', 2).map((t) => t.text)).toEqual(['three', 'two'])
   })
 
-  it('caps the mind log at MAX_MIND_KEPT (400)', async () => {
+  it('keeps the mind log bounded near MAX_MIND_KEPT (400)', async () => {
+    // The cap is deliberately SOFT. trimJsonl rewrites the whole file, and think()
+    // runs on the streaming path (once per content block of every run), so trimming
+    // on every write meant a full read + full rewrite per thought once the file
+    // passed 400. It now trims every MIND_TRIM_EVERY (50) writes, so the file sits
+    // between the cap and cap+50 rather than exactly at it — bounded, which is the
+    // property that matters, without the per-thought I/O.
     const office = await freshOffice()
-    for (let i = 0; i < 405; i++) office.think('agent-a', { text: `t${i}` })
+    for (let i = 0; i < 600; i++) office.think('agent-a', { text: `t${i}` })
     const jsonlFile = join(agentDir('agent-a'), 'mind.jsonl')
     const lines = fsState.jsonl.get(jsonlFile)!.split('\n').filter(Boolean)
-    expect(lines).toHaveLength(400)
+    expect(lines.length).toBeGreaterThanOrEqual(400)
+    expect(lines.length).toBeLessThanOrEqual(450)
+    // Whatever survives is the NEWEST slice — the oldest thoughts are the ones cut.
+    expect(lines[lines.length - 1]).toContain('t599')
+  })
+
+  it('caps the board so it cannot grow without bound', async () => {
+    // Agents are instructed to post every run and the whole file is rewritten on
+    // every reply, so an uncapped board is both a disk leak and a growing cost per
+    // post. (listThreads sorts by updatedAt, and these are all created within the
+    // same millisecond, so this asserts the cap — not a specific survivor.)
+    const office = await freshOffice()
+    for (let i = 0; i < 560; i++) office.postThread({ title: `t${i}`, body: `b${i}`, authorId: 'operator' }, [])
+    expect(office.listThreads().length).toBe(500)
+    // The most recently posted thread is never the one dropped.
+    expect(office.listThreads().some((t) => t.title === 't559')).toBe(true)
   })
 })
 

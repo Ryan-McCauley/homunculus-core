@@ -30,6 +30,24 @@ from engine.rollup import TIMEFRAME_SOURCE             # noqa: E402
 from engine.screen import GATE_ORDER, SCHEMA_VERSION, run_screen  # noqa: E402
 
 
+def _json_safe(value):
+    """Recursively replace non-finite floats (NaN, inf, -inf) with None.
+
+    These are not representable in JSON. Python's encoder emits them as bare
+    NaN/Infinity tokens, which JSON.parse rejects — so one overflowed indicator
+    anywhere in a 142-symbol result would fail the entire scan instead of showing
+    up as a single missing value. None is the shape every gate already understands
+    as "no reading".
+    """
+    if isinstance(value, float):
+        return value if value == value and value not in (float("inf"), float("-inf")) else None
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
+
+
 def fail(message: str, detail: str = "") -> int:
     """Emit a structured error on stdout so the caller always parses JSON."""
     body = {"schemaVersion": SCHEMA_VERSION, "error": message}
@@ -83,7 +101,15 @@ def main(argv) -> int:
         print("screener engine crashed: %r" % (exc,), file=sys.stderr)
         return fail("screener engine failed", str(exc))
 
-    json.dump(result, sys.stdout, separators=(",", ":"))
+    # allow_nan=False + a sanitizing pass, because Python's json module happily
+    # emits bare NaN/Infinity, which are NOT valid JSON and make JSON.parse throw on
+    # the Node side — failing the whole scan with "output could not be read as JSON"
+    # rather than the per-symbol degradation this module promises. Two ways in:
+    # json.loads ACCEPTS NaN/Infinity literals in an incoming job, and a
+    # finite-but-huge close can overflow an EMA seed to inf, making the MACD
+    # histogram inf - inf = nan. Non-finite becomes None, which every gate already
+    # treats as "missing".
+    json.dump(_json_safe(result), sys.stdout, separators=(",", ":"), allow_nan=False)
     sys.stdout.write("\n")
     return 0
 
