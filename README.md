@@ -149,6 +149,42 @@ NOTARIZE=1 npm run dist:mac
 Hardened runtime and entitlements (`build/entitlements.mac.plist`) are already
 configured; `NOTARIZE=1` is what turns on the signing-and-stapling step.
 
+## Home Assistant
+
+The HOME tab and the BRIDGE Home Assistant tiles poll a Home Assistant instance
+over its REST API (`server/homeassistant.ts`). Two things are needed: `HA_URL`
+and a long-lived access token in `HA_TOKEN`.
+
+A wizard handles both — standing HA up on a new machine if it isn't running yet,
+then verifying the token and writing the two keys into `.env`:
+
+```bash
+./scripts/setup-home-assistant.sh
+```
+
+```powershell
+.\scripts\setup-home-assistant.ps1
+```
+
+It asks how HA should be set up and branches accordingly:
+
+| Mode | What it does |
+| --- | --- |
+| `docker` | Runs Home Assistant Container here. On Linux it uses host networking so mDNS/SSDP device discovery works; Docker Desktop on Windows/macOS can't, so discovery is limited to IP/cloud integrations. |
+| `supervised` / `vm` | HA OS or Supervised is already on this machine (or a Pi/VM you flashed) — skips install, wires up only. |
+| `attach` | HA runs elsewhere; just point at its URL. |
+
+The script never handles your HA password — it prints the steps to mint a
+long-lived token in the HA UI, reads it with echo off, then probes `/api/config`
+and `/api/states` before writing anything. Both flags and env vars are accepted
+for unattended runs:
+
+```bash
+HA_TOKEN=... ./scripts/setup-home-assistant.sh --mode attach --url http://ha.local:8123 --non-interactive
+```
+
+Restart Homunculus afterwards to pick up the new config.
+
 ## Layout
 
 ```
