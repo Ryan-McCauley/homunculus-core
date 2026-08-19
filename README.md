@@ -195,6 +195,24 @@ electron/      thin desktop shell (main.ts only)
 Dockerfile     backend image
 ```
 
-## License
+## License and dependencies
 
-MIT — see [LICENSE](LICENSE).
+Homunculus Core is MIT licensed — see [LICENSE](LICENSE). Use it, fork it, ship
+it; just keep the copyright notice.
+
+**One dependency is not open source.** The Computer Core and every agent session
+run on `@anthropic-ai/claude-agent-sdk`, which is proprietary software owned by
+Anthropic PBC ("all rights reserved", governed by [Anthropic's legal
+terms](https://code.claude.com/docs/en/legal-and-compliance)). It is installed
+from npm like any other package, and running it needs your own Claude Pro/Max
+subscription token — see [Computer Core auth](#computer-core-auth-subscription-not-the-api)
+above. Nothing in this repository redistributes it.
+
+Everything else in the tree is permissively licensed (MIT, ISC, BSD-2-Clause,
+Unlicense). Per-package attributions are in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
+> If you package a desktop build with `npm run dist`, note that
+> `electron-builder` bundles `node_modules` into the artifact — which embeds the
+> Agent SDK. Publishing source is unaffected; distributing binaries is worth
+> checking against Anthropic's terms first.
