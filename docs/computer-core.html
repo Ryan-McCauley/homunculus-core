@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en" data-theme="prism">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Computer Core — Homunculus Core Docs</title>
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="holo-rule top"></div>
+<header class="site-header">
+  <a class="wordmark" href="index.html">HOMUNCULUS CORE</a>
+  <span class="sub">Documentation</span>
+</header>
+
+<div class="layout">
+<nav class="sidebar">
+  <div class="group">Start Here</div>
+  <a href="index.html">Overview</a>
+  <a href="getting-started.html">Getting Started</a>
+  <a href="faq.html">FAQ &amp; Troubleshooting</a>
+
+  <div class="group">Using the Bridge</div>
+  <a href="widgets-layout.html">Widgets &amp; Layout</a>
+  <a href="computer-core.html" class="active">Computer Core</a>
+  <a href="tab-bridge.html">BRIDGE Tab</a>
+  <a href="tab-osint.html">OSINT Tab</a>
+  <a href="tab-home.html">HOME Tab (Home Assistant)</a>
+  <a href="tab-data.html">DATA Tab</a>
+  <a href="tab-archive.html">ARCHIVE Tab</a>
+  <a href="tab-crypto.html">CRYPTO Tab</a>
+
+  <div class="group">Deploy &amp; Operate</div>
+  <a href="deployment.html">Deployment</a>
+  <a href="configuration.html">Configuration Reference</a>
+  <a href="security.html">Security</a>
+  <a href="upgrading.html">Upgrading</a>
+
+  <div class="group">Development</div>
+  <a href="architecture.html">Architecture</a>
+  <a href="protocol.html">WebSocket Protocol</a>
+  <a href="widget-development.html">Widget Development</a>
+  <a href="backend-modules.html">Backend Modules</a>
+  <a href="screener-engine.html">Screener Engine</a>
+  <a href="contributing.html">Contributing &amp; Testing</a>
+</nav>
+
+<main class="content">
+<h1>Computer Core</h1>
+<p class="lede">The Claude-powered ship's computer: how it runs, what it is allowed to touch, the agents that work alongside it, and the audit log that records everything they do.</p>
+
+<h2>Where and how it runs</h2>
+<p>The Computer Core is driven by the <strong>Claude Agent SDK</strong> (<code>@anthropic-ai/claude-agent-sdk</code>) inside the <strong>backend Node process</strong> — deliberately not Electron's main process, which crashed when this was tried (see the README's architecture section). Because it lives in the backend, the same assistant serves the desktop shell, a browser tab, and a phone over Tailscale.</p>
+<p>It authenticates with your <strong>Claude subscription</strong>, not a per-token billed API key. You mint a long-lived token once with <code>claude setup-token</code> and put it where the backend reads it:</p>
+<pre><code>CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...   # required (from an admin account)
+# HOMUNCULUS_MODEL=sonnet                  # optional model override</code></pre>
+<p><code>HOMUNCULUS_MODEL</code> is the server-wide model override: when set, it is passed as the <code>model</code> option on every Computer Core turn and every proactive check, and it is the default for agent runs (individual agents can pin their own model). When unset, the sessions use the Claude CLI's default, and the chat widget reports the model as <code>local session</code>. Forcing the subscription path is deliberate — <code>ANTHROPIC_API_KEY</code> is on the never-forwarded list (below), so a billed key in the server env cannot leak into these sessions.</p>
+
+<h2>Session lifecycle</h2>
+<p>Each WebSocket connection gets its own <code>ChatSession</code> (<code>server/chat.ts</code>). The first turn starts a fresh Agent SDK session; the server captures the SDK's <code>session_id</code> and passes it back as <code>resume</code> on every later turn, so the conversation keeps its context for as long as the connection lives. If a turn fails, the stored session id is dropped on purpose: a corrupt or expired id would otherwise make every subsequent turn resume the same broken conversation, so the next turn starts fresh instead — the conversation's context is the price of getting the feature back.</p>
+<p>Every turn is wrapped in the system persona (the Star Trek ship's-computer voice that addresses you as "Captain") and prefixed with a live context block: a compact PC telemetry summary (CPU, memory, storage, network, uptime, top processes) and a home-state summary from the latest Home Assistant snapshot. State questions are answered from that data without any tool call.</p>
+
+<h2>What it can do — and what it cannot</h2>
+<p>The Computer Core chat runs with <code>allowedTools: []</code> — <strong>no SDK tools at all</strong>. It cannot read files, run shell commands, or browse. Its only lever on the world is the <strong>exec block</strong>: it embeds <code>&lt;exec&gt;{"type":"routine","name":"goodnight"}&lt;/exec&gt;</code> or <code>&lt;exec&gt;{"type":"ha","entityId":"switch.voltaire_charger_switch","service":"switch.turn_on","data":{}}&lt;/exec&gt;</code> in its reply. The <em>server</em> strips those blocks out of the text, executes them in order through <code>executeRoutine</code> / <code>executeHaCommand</code> (<code>server/routines.ts</code>), and appends a ✓/✗ result line to the chat. The model asks; the server acts.</p>
+
+<h3>The environment allowlist (agentEnv)</h3>
+<p>Every Agent SDK child this server starts — the Computer Core chat, the proactive monitor, fleet agents, strategy skill runs — gets its environment from <code>agentEnv()</code> (<code>server/agentEnv.ts</code>), which is an <strong>allowlist, not a denylist</strong>. Nothing reaches a child process unless it is named there:</p>
+<ul>
+  <li><strong>System keys</strong> — PATH, HOME, TEMP, and the rest of what a process needs to run at all.</li>
+  <li><strong>App config</strong> — <code>HOMUNCULUS_MODEL</code> and <code>HOMUNCULUS_PORT</code> only.</li>
+  <li><strong>The subscription token</strong> — <code>CLAUDE_CODE_OAUTH_TOKEN</code>.</li>
+</ul>
+<p>A <code>NEVER_FORWARDED</code> list states the intent explicitly: <code>GEMINI_API_KEY</code>/<code>GEMINI_API_SECRET</code> (the exchange keys), <code>HA_TOKEN</code>/<code>HA_URL</code>, <code>DATABASE_URL</code>, <code>HOMUNCULUS_TOKEN</code>/<code>HOMUNCULUS_ADMIN_TOKEN</code>, <code>CMC_API_KEY</code>, the OSINT feed keys, and <code>ANTHROPIC_API_KEY</code>/<code>ANTHROPIC_AUTH_TOKEN</code>. A new credential added to <code>.env</code> is therefore safe by default — no Claude session sees it until someone deliberately adds it to the allowlist.</p>
+
+<h3>The process registry</h3>
+<p>Every live Claude session is registered in <code>server/claudeProcesses.ts</code> under a kind — <code>core-chat</code>, <code>proactive</code>, <code>agent</code>, <code>agent-chat</code>, <code>agent-handoff</code>, or <code>skill</code> (<code>shared/claude.ts</code>). The registry makes the sessions enumerable and stoppable: stopping one aborts the SDK's <code>AbortController</code>, which closes stdin and gives the child a ~2-second grace window rather than a hard kill, and the stop itself is written to the audit log as a <code>claude.stop</code> entry with who stopped what and how long it had run.</p>
+
+<h2>The proactive monitor</h2>
+<p>A background sibling of the chat (<code>ProactiveMonitor</code> in <code>server/chat.ts</code>). It watches Home Assistant state transitions — a washer or dryer cycle reaching <code>end</code>, car charging stopping, a litter-robot fault code, the waste drawer crossing 80% — then waits out a 45-second debounce and asks Claude one self-contained question over the home-state snapshot. If the model answers anything other than <code>SILENT</code>, the text is broadcast to every client as a CORE ALERT toast (and into the ARCHIVE spool), rate-limited to at most one alert per 5 minutes. These checks deliberately never resume a session: each one is handed a full snapshot, so a persistent conversation would only grow context without bound.</p>
+
+<h2>The agents subsystem</h2>
+<p>"Agent" means two related things in Homunculus, and both are built on the same principle: <strong>authority lives in server code, never in the prompt.</strong></p>
+
+<h3>Fleet agents (the INTELLIGENCE desk)</h3>
+<p>A fleet agent (<code>shared/agents.ts</code>, <code>server/agents.ts</code>) is an employee you hire in the CRYPTO tab's INTELLIGENCE section. You write its <strong>mandate</strong> — free text describing its job — and the server turns that into a headless Agent SDK session with live portfolio context. Each agent has:</p>
+<table>
+  <thead><tr><th>Setting</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>autonomy</code></td><td><code>advisory</code> (may only talk — every trade proposal is refused), <code>propose</code> (trades land in your confirm queue), or <code>auto</code> (executes directly up to its cap).</td></tr>
+    <tr><td><code>maxUsd</code></td><td>Per-trade notional ceiling, itself capped by a global <code>AGENT_MAX_USD_CEILING</code> of $250. Auto spend is additionally bounded by a rolling 24-hour budget of 10× the per-trade cap, tracked in a time-trimmed spend ledger the agent cannot flush.</td></tr>
+    <tr><td><code>model</code></td><td>Optional per-agent model pin (Opus / Sonnet / Haiku / Fable ids, or empty for the server default, i.e. <code>HOMUNCULUS_MODEL</code>).</td></tr>
+    <tr><td><code>intervalMinutes</code>, <code>events</code></td><td>What wakes it: a timer, and/or portfolio events — new signal, order fill, drawdown past <code>drawdownPct</code>, new proposal, @mention.</td></tr>
+    <tr><td><code>cooldownMinutes</code>, <code>idleStanddownMinutes</code></td><td>Minimum gap between automatic runs, and how long an idle agent keeps its resumed chat session before writing a handoff note and standing down.</td></tr>
+  </tbody>
+</table>
+<p><strong>How a run happens.</strong> Triggers are a manual RUN, the interval, portfolio events, market alerts that name the agent (<code>wakeAgentId</code>), a blocker being answered, or a manager assignment. Only one agent session runs at a time process-wide (<code>MAX_CONCURRENT_RUNS = 1</code>); when several are eligible, <code>pickRunOrder</code> (<code>shared/agentScheduling.ts</code>) decides who gets the slot by <em>what the wake is for</em> — manual first (priority 120), then answers (100), assignments (90), alerts (70), market events (60), interval (40), mentions (20), standdown (5) — with ties broken by who has waited longest. A run is force-failed and aborted after 10 minutes and capped at 60 turns.</p>
+<p><strong>How authority is enforced.</strong> An agent asks for a trade by POSTing to <code>/api/crypto/agents/:id/propose</code>, authenticated by a per-agent propose key injected only into that agent's own prompt (compared in constant time). The server — never the agent — rules each proposal <code>refused</code>, <code>staged</code>, or <code>executed</code> against the autonomy dial, the per-trade cap, the global ceiling, and the rolling budget. The mandate is untrusted input: it can claim any authorization it likes and still be refused at <code>advisory</code>.</p>
+
+<h3>The HOME agent uplink: manifests, intents, plans</h3>
+<p>For the house, an agent (or you, typing a sentence) operates through a compile-then-execute pipeline — nothing fires directly from text.</p>
+<ul>
+  <li><strong>Manifest</strong> (<code>shared/agentManifest.ts</code>) — the contract: every action this app is willing to expose, derived from the live Home Assistant entity list, so it describes <em>your</em> house. Each action has a stable id (<code>&lt;entityId&gt;:&lt;verb&gt;</code>, e.g. <code>light.den:set_brightness</code>), a payload schema, and a guardrail tier: <code>read</code>, <code>write</code> (routine and reversible — an agent may do it alone, logged), or <code>confirm</code> (a human must approve that specific op). Unlocking a lock and every cover movement are confirm-tier; domains absent from the table (sensors, trackers, …) have no actions at all — omission is the primary defence.</li>
+  <li><strong>Intent</strong> (<code>server/agentIntent.ts</code>) — the compiler. Free text ("movie mode, but keep the reading lamp on and lock up") or structured ops from an LLM compile into a numbered plan against the manifest. The compiler is deterministic keyword matching, never invents an entity, and flags its inferences (closing an open garage door because you said "lock up") as notes on confirm-tier ops. Fragments it cannot compile are reported in <code>unmatched</code>, never silently dropped.</li>
+  <li><strong>Plan</strong> (<code>shared/agentPlan.ts</code>) — the inspectable artifact: numbered ops with entity, service, payload, and tier. Execution re-validates every op against the manifest (the plan round-trips through the client, so it is untrusted by the time it comes back), supports dry runs, holds confirm-tier ops until their specific number is approved, and keeps going past a failed op so "lock both doors" still locks the second when the first errors. Every executed op is audited as <code>ha.agent.execute</code>.</li>
+  <li><strong>Scheduling</strong> (<code>shared/agentScheduling.ts</code>) — used by the fleet, as described above: trigger priority, then staleness, then id, so the run order never depends on map iteration order.</li>
+</ul>
+
+<h2>The audit log</h2>
+<p><code>server/auditLog.ts</code> keeps an <strong>append-only, hash-chained</strong> record of every state mutation, in two places at once:</p>
+<ul>
+  <li><code>data/audit/audit-YYYY-MM.jsonl</code> — the write-ahead log, written first and synchronously, one JSON line per entry. Files rotate monthly, but the chain and the <code>seq</code> counter continue across rotation. This file is never rewritten or trimmed; a correction is a new entry referencing the old one, never an edit.</li>
+  <li>Postgres <code>audit_log</code> table (when <code>DATABASE_URL</code> is set) — the queryable mirror, guarded by <code>BEFORE UPDATE OR DELETE</code> triggers that make it refuse changes outright. Entries stream in behind the file and backfill on reconnect; without a database the log is simply file-only.</li>
+</ul>
+<p>Each entry records a <code>seq</code>, timestamp, <strong>actor</strong> (carried implicitly through <code>AsyncLocalStorage</code> — the operator on an HTTP request, <code>agent:&lt;id&gt;</code> inside an agent run, <code>system</code> otherwise), origin, action, resource, a human-readable summary, optional before/after state, and the sha256 of the previous entry. Editing or deleting any line breaks every hash after it, and <code>GET /api/audit/verify</code> re-derives the whole chain and cross-checks every Postgres row against the file — tampering has to succeed in both independent copies to go unnoticed, including rows <em>inserted</em> into the table that no file ever contained.</p>
+<p>Actions recorded include, among others: <code>agent.create</code> / <code>agent.update</code> / <code>agent.remove</code> (with the exact before → after diff when an autonomy dial or cap is widened), <code>agent.run.start</code>, <code>agent.trade.executed</code> / <code>.staged</code> / <code>.refused</code>, <code>ha.agent.execute</code> for every uplink op, and <code>claude.stop</code> when someone kills a live session. The CRYPTO tab's AUDIT view reads this log.</p>
+
+<div class="callout danger"><span class="callout-title">Danger</span> Treat the Claude sessions this server starts as having your hands. They run with <code>permissionMode: 'bypassPermissions'</code> — no interactive permission prompts — and while the Computer Core chat itself has no tools, <strong>fleet agents get an unrestricted shell</strong> on the backend host, with their prompts assembled partly from text other agents wrote and from live market and home-state strings: a prompt-injection surface pointed at a shell. An assistant with terminal and file access can read and delete files the server user can, exfiltrate anything in its environment, and call any local API. The mitigations described on this page are what stand between that and your keys: the <code>agentEnv</code> allowlist keeps exchange keys, <code>HA_TOKEN</code>, and admin tokens out of every session; trade authority is enforced server-side with hard caps; house actions go through the tiered manifest; and everything lands in the tamper-evident audit log. Do not weaken these — in particular, never add a credential to the <code>agentEnv</code> allowlist casually, and keep <code>HOMUNCULUS_TOKEN</code> set on any backend reachable beyond localhost.</div>
+
+</main>
+</div>
+
+<footer class="site-footer">Homunculus Core — starship-bridge command interface</footer>
+</body>
+</html>

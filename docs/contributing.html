@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en" data-theme="prism">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Contributing &amp; Testing — Homunculus Core Docs</title>
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="holo-rule top"></div>
+<header class="site-header">
+  <a class="wordmark" href="index.html">HOMUNCULUS CORE</a>
+  <span class="sub">Documentation</span>
+</header>
+
+<div class="layout">
+<nav class="sidebar">
+  <div class="group">Start Here</div>
+  <a href="index.html">Overview</a>
+  <a href="getting-started.html">Getting Started</a>
+  <a href="faq.html">FAQ &amp; Troubleshooting</a>
+
+  <div class="group">Using the Bridge</div>
+  <a href="widgets-layout.html">Widgets &amp; Layout</a>
+  <a href="computer-core.html">Computer Core</a>
+  <a href="tab-bridge.html">BRIDGE Tab</a>
+  <a href="tab-osint.html">OSINT Tab</a>
+  <a href="tab-home.html">HOME Tab (Home Assistant)</a>
+  <a href="tab-data.html">DATA Tab</a>
+  <a href="tab-archive.html">ARCHIVE Tab</a>
+  <a href="tab-crypto.html">CRYPTO Tab</a>
+
+  <div class="group">Deploy &amp; Operate</div>
+  <a href="deployment.html">Deployment</a>
+  <a href="configuration.html">Configuration Reference</a>
+  <a href="security.html">Security</a>
+  <a href="upgrading.html">Upgrading</a>
+
+  <div class="group">Development</div>
+  <a href="architecture.html">Architecture</a>
+  <a href="protocol.html">WebSocket Protocol</a>
+  <a href="widget-development.html">Widget Development</a>
+  <a href="backend-modules.html">Backend Modules</a>
+  <a href="screener-engine.html">Screener Engine</a>
+  <a href="contributing.html" class="active">Contributing &amp; Testing</a>
+</nav>
+
+<main class="content">
+<h1>Contributing &amp; Testing</h1>
+<p class="lede">Dev setup, every npm script, what the test suites cover, and the conventions to match.</p>
+
+<p>Homunculus is TypeScript end to end — one Node backend, a React renderer, a thin Electron shell, shared types between them — plus a small dependency-free Python engine for screening. This page covers getting a checkout running, the scripts, and what the tests do and do not cover.</p>
+
+<h2>Setup</h2>
+<pre><code>nvm use            # Node 20 LTS, pinned in .nvmrc
+npm install
+npm run dev        # backend on :8787 + the Electron shell</code></pre>
+
+<p>No Xcode or native-build dance is needed: <code>node-pty</code> runs under Node with prebuilt binaries. If the terminal stops working after a Node or Electron upgrade, rebuild the binding with <code>npm run rebuild</code>.</p>
+
+<p>For the Python engine you need any Python 3 on <code>PATH</code>. The server probes for one at startup; <code>SCREENER_PYTHON</code> pins a specific interpreter if you have several.</p>
+
+<h2>Scripts</h2>
+<table>
+<tr><th>Script</th><th>What it does</th></tr>
+<tr><td><code>npm run dev</code></td><td>Runs <code>dev:server</code> and <code>dev:app</code> together under <code>concurrently</code>, with the backend labelled green and the app cyan.</td></tr>
+<tr><td><code>npm run dev:server</code></td><td>Backend alone with reload — <code>tsx watch server/index.ts</code>.</td></tr>
+<tr><td><code>npm run dev:app</code></td><td>Electron renderer alone — <code>electron-vite dev</code>.</td></tr>
+<tr><td><code>npm run start</code> / <code>npm run server</code></td><td>Backend without watch. What production runs.</td></tr>
+<tr><td><code>npm run build</code></td><td>Builds the Electron app (<code>electron-vite build</code>).</td></tr>
+<tr><td><code>npm run build:web</code></td><td>Builds the browser UI the backend serves.</td></tr>
+<tr><td><code>npm run typecheck</code></td><td><code>tsc --noEmit</code> over the whole project. Fast; run it before every commit.</td></tr>
+<tr><td><code>npm test</code></td><td>The full suite: vitest, then the Python engine tests.</td></tr>
+<tr><td><code>npm run test:ts</code></td><td>Vitest only.</td></tr>
+<tr><td><code>npm run test:watch</code></td><td>Vitest in watch mode.</td></tr>
+<tr><td><code>npm run test:coverage</code></td><td>Vitest with v8 coverage, text and HTML reporters.</td></tr>
+<tr><td><code>npm run test:engine</code></td><td>The Python engine tests, via <code>scripts/run-engine-tests.mjs</code>.</td></tr>
+<tr><td><code>npm run fixtures:parity</code></td><td>Regenerates <code>engine/fixtures/parity.json</code> from the TypeScript indicators.</td></tr>
+<tr><td><code>npm run rebuild</code></td><td>Rebuilds the native PTY binding for the current Electron ABI.</td></tr>
+<tr><td><code>npm run dist</code> / <code>dist:mac</code></td><td>Builds distributable desktop artifacts. <code>dist:mac</code> enables notarization when <code>NOTARIZE</code> is set.</td></tr>
+<tr><td><code>npm run icons</code></td><td>Regenerates app icons.</td></tr>
+<tr><td><code>npm run release:patch|minor|major</code></td><td>Version bump, tagged <code>release: vX.Y.Z</code>. The <code>version</code> lifecycle hook stages <code>CHANGELOG.md</code> into the release commit.</td></tr>
+</table>
+
+<h2>Code style</h2>
+<p>There is no linter config in the repo; the compiler is the enforcement. <code>tsconfig.json</code> is strict and then some:</p>
+<table>
+<tr><th>Setting</th><th>Consequence</th></tr>
+<tr><td><code>strict: true</code></td><td>Full strict mode, including <code>strictNullChecks</code>.</td></tr>
+<tr><td><code>noUnusedLocals</code>, <code>noUnusedParameters</code></td><td>Dead bindings are build errors, not warnings.</td></tr>
+<tr><td><code>isolatedModules</code></td><td>Type-only imports must say <code>import type</code>.</td></tr>
+<tr><td><code>forceConsistentCasingInFileNames</code></td><td>Case mistakes fail on Linux and Windows alike, not just in CI.</td></tr>
+<tr><td><code>target: ES2022</code>, <code>module: ESNext</code></td><td>ESM throughout. Node built-ins are imported with the <code>node:</code> prefix in newer modules.</td></tr>
+<tr><td><code>paths: { "@/*": ["src/*"] }</code></td><td><code>@/</code> aliases <code>src/</code> in the renderer; vitest mirrors the alias.</td></tr>
+</table>
+
+<p>Beyond the compiler, follow the house conventions visible in any module:</p>
+<ul>
+<li><strong>Comment the decision, not the mechanics.</strong> Modules open with a header block explaining why they look the way they do — what was tried, what broke, what constraint forced the shape. That reasoning is the part that gets lost; the code already says what it does.</li>
+<li>Section dividers use the box-drawing style (<code>// ── Name ─────</code>).</li>
+<li>Types that cross the server/client boundary live in <code>shared/</code>, never duplicated.</li>
+<li>No hardcoded colours in the renderer — CSS custom properties only.</li>
+</ul>
+
+<h2>Testing</h2>
+
+<h3>What is covered</h3>
+<p>Vitest runs in a Node environment over <code>**/*.test.ts(x)</code>, with roughly 71 test files: about 31 in <code>server/</code>, 20 in <code>shared/</code>, and 20 in <code>src/</code> (mostly <code>src/lib/</code>). Coverage is measured over <code>shared/**</code>, <code>server/**</code>, and <code>src/lib/**</code> — deliberately the logic layers, not the components.</p>
+
+<p>The pattern that makes this work is separating judgement from I/O. <code>screenerRunner.ts</code> is the clearest example: <code>buildScreenerJob()</code> is pure and synchronous, so the interesting half is unit-testable with no subprocess, while <code>runScreenerEngine()</code> holds everything that fails in boring operational ways and is tested against a three-line fake engine. Aim for that split in new code.</p>
+
+<pre><code>npm run test:ts                      # everything
+npx vitest run server/osint.test.ts  # one file
+npm run test:watch                   # watch mode</code></pre>
+
+<h3>The Python engine</h3>
+<pre><code>npm run test:engine
+python3 -m unittest discover -t . -s engine   # equivalent</code></pre>
+<p>Stdlib <code>unittest</code>, no dependencies. <code>test_parity.py</code> is the load-bearing one — it fails if the Python and TypeScript indicator implementations disagree past <code>1e-9</code>. See <a href="screener-engine.html">Screener Engine</a>.</p>
+
+<h3>What has no automated coverage</h3>
+<div class="callout warn"><span class="callout-title">Warning</span> These areas are verified by hand. Changes touching them deserve extra care in review.</div>
+<ul>
+<li><strong>React components and panels.</strong> Tests cover <code>src/lib/</code>, not rendering. There is no component test harness.</li>
+<li><strong>The Electron shell.</strong> Window lifecycle, the preload bridge, and the vault are untested.</li>
+<li><strong>WebSocket integration.</strong> Modules are tested in isolation; nothing exercises a real socket end to end.</li>
+<li><strong>Live external integrations.</strong> Home Assistant, Gemini, CoinMarketCap, and the OSINT feeds are not contract-tested against the real services.</li>
+</ul>
+
+<h3>Manual verification checklist</h3>
+<ol>
+<li><code>npm run typecheck</code> and <code>npm test</code> both clean.</li>
+<li><code>npm run dev</code>, then confirm every tab you touched still renders and populates.</li>
+<li>Open the browser view at <code>localhost:5173</code> too — the renderer runs in both, and <code>window.homunculus</code> guards are easy to get wrong.</li>
+<li>If you touched layout or widgets: move a widget between tabs, reload, and confirm it persisted.</li>
+<li>If you touched the transport: kill the backend with the UI open, restart it, and confirm the client reconnects and re-subscribes.</li>
+<li>If you touched the terminal: open a PTY, resize it, and kill it.</li>
+<li>If you touched anything credential-adjacent: confirm <code>agentEnv()</code> still strips it.</li>
+</ol>
+
+<h2>Branches and commits</h2>
+<p>Work happens on feature branches named <code>feat/&lt;topic&gt;</code> and merges to <code>main</code>. Commit subjects are written as imperative statements of intent, not conventional-commit prefixes:</p>
+<pre><code>Expand the HOME tab into a full Home Assistant surface
+Add a Home Assistant setup wizard for new machines
+Note that HA_TOKEN must come from an admin account
+Bring in the production hardening</code></pre>
+<p>Match that voice: say what the change does to the product. Release commits are the exception, formatted <code>release: vX.Y.Z</code> by the npm version scripts.</p>
+
+<h2>Before opening a pull request</h2>
+<ul>
+<li><code>npm run typecheck</code> passes.</li>
+<li><code>npm test</code> passes, including the engine tests.</li>
+<li>New logic has a colocated <code>.test.ts</code>.</li>
+<li>New configuration is in <code>.env.example</code> and in <a href="configuration.html">the configuration reference</a>.</li>
+<li>New credentials are in <code>SECRET_SPECS</code> and <code>NEVER_FORWARDED</code>.</li>
+<li><code>CHANGELOG.md</code> updated if the change is user-visible.</li>
+<li>Docs updated if you changed the protocol, configuration, or a tab surface.</li>
+</ul>
+
+</main>
+</div>
+
+<footer class="site-footer">Homunculus Core — starship-bridge command interface</footer>
+</body>
+</html>

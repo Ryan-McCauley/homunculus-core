@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en" data-theme="prism">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CRYPTO Tab — Homunculus Core Docs</title>
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="holo-rule top"></div>
+<header class="site-header">
+  <a class="wordmark" href="index.html">HOMUNCULUS CORE</a>
+  <span class="sub">Documentation</span>
+</header>
+
+<div class="layout">
+<nav class="sidebar">
+  <div class="group">Start Here</div>
+  <a href="index.html">Overview</a>
+  <a href="getting-started.html">Getting Started</a>
+  <a href="faq.html">FAQ &amp; Troubleshooting</a>
+
+  <div class="group">Using the Bridge</div>
+  <a href="widgets-layout.html">Widgets &amp; Layout</a>
+  <a href="computer-core.html">Computer Core</a>
+  <a href="tab-bridge.html">BRIDGE Tab</a>
+  <a href="tab-osint.html">OSINT Tab</a>
+  <a href="tab-home.html">HOME Tab (Home Assistant)</a>
+  <a href="tab-data.html">DATA Tab</a>
+  <a href="tab-archive.html">ARCHIVE Tab</a>
+  <a href="tab-crypto.html" class="active">CRYPTO Tab</a>
+
+  <div class="group">Deploy &amp; Operate</div>
+  <a href="deployment.html">Deployment</a>
+  <a href="configuration.html">Configuration Reference</a>
+  <a href="security.html">Security</a>
+  <a href="upgrading.html">Upgrading</a>
+
+  <div class="group">Development</div>
+  <a href="architecture.html">Architecture</a>
+  <a href="protocol.html">WebSocket Protocol</a>
+  <a href="widget-development.html">Widget Development</a>
+  <a href="backend-modules.html">Backend Modules</a>
+  <a href="screener-engine.html">Screener Engine</a>
+  <a href="contributing.html">Contributing &amp; Testing</a>
+</nav>
+
+<main class="content">
+<h1>CRYPTO Tab</h1>
+<p class="lede">Market view, charts and indicators, saved screeners, the headless strategy runner, indicator alerts, and the hash-chained audit log — a full trading desk backed by the Gemini exchange.</p>
+
+<div class="callout danger"><span class="callout-title">Danger — this trades real money, and none of it is financial advice</span>
+Nothing in this tab, its signals, screeners, strategies, or alerts is investment advice. More importantly: <strong>the strategy runner is not a simulator.</strong> Strategy skills propose trades into a confirm-first queue, and when you confirm a proposal — or when the optional auto-execute switch is enabled — the server places <strong>real orders on the Gemini exchange</strong> with your <code>GEMINI_API_KEY</code> / <code>GEMINI_API_SECRET</code> (<code>placeOrder()</code> in <code>server/crypto.ts</code>, posting to Gemini's <code>/v1/order/new</code>). Confirm-first is the default (<code>confirmFirst</code> is ON in the GLOBAL strategy settings), auto-execute ships disabled with $100 per-strategy USD caps, and safe mode auto-arms protective stops — but the executing path is live capital, not paper. Do not point this at an account holding money you cannot afford to lose.
+</div>
+
+<h2>Layout</h2>
+<p>The CRYPTO tab is one full-width dashboard widget (<code>dash.crypto</code>, rendered by <code>src/panels/CryptoDashboard.tsx</code>) split into sections: <strong>OVERVIEW</strong>, <strong>MARKET</strong>, <strong>SCREENERS</strong>, <strong>TRADES</strong>, <strong>INTELLIGENCE</strong>, <strong>SETTINGS</strong>, and <strong>AUDIT</strong>. The server side is <code>server/crypto.ts</code> (the <code>cryptoHub</code>), with satellite modules for CMC volume (<code>server/cmc.ts</code>), alerts (<code>server/cryptoAlerts.ts</code>), strategy runs (<code>server/strategyRunner.ts</code>), strategy tuning (<code>server/cryptoStrategySettings.ts</code>), screeners (<code>server/screenerStore.ts</code>, <code>server/screenerApi.ts</code>, <code>server/screenerRunner.ts</code>), and the audit log (<code>server/auditLog.ts</code>).</p>
+
+<h2>Market view and data sources</h2>
+<p>Primary market data comes from <strong>Gemini's public REST API</strong> (no key needed):</p>
+<ul>
+  <li><code>/v1/symbols</code> — the tracked universe, filtered to canonical USD-quoted pairs. GUSD/RLUSD-quoted duplicates and crosses are dropped at the source, and symbols Gemini refuses to trade for this account (403 <code>RestrictedSymbol</code>) are learned at order time, persisted to <code>data/crypto/restricted-symbols.json</code>, and never proposed again.</li>
+  <li><code>/v2/ticker/&lt;symbol&gt;</code> — 24h open/high/low/close, bid/ask, and the derived 24h change.</li>
+  <li><code>/v2/candles/&lt;symbol&gt;/&lt;tf&gt;</code> — up to 500 candles per symbol and timeframe. Timeframes are <code>1m</code>, <code>5m</code>, <code>15m</code>, <code>1hr</code>, <code>4hr</code>, <code>1day</code>; Gemini has no native 4hr feed, so <strong>4hr bars are synthesized locally</strong> from the 1hr feed on UTC-aligned buckets (<code>aggregateTo4h</code>). The candle cache is persisted to <code>data/crypto/candle-cache.json</code> so restarts skip re-seeding.</li>
+</ul>
+<p><strong>CoinMarketCap is a secondary, cross-exchange signal</strong> (<code>server/cmc.ts</code>), not the price feed. Gemini is a thin venue, so a coin can be breaking out market-wide while Gemini's own 4hr volume stays flat; CMC's aggregated 24h volume change is fetched to override that false negative in the volume gate, and it also supplies market cap and 24h dollar volume to the screeners. Configuration:</p>
+<ul>
+  <li><code>CMC_API_KEY</code> in <code>.env</code> — read server-side only and <strong>never sent to the client</strong>. Without it, CMC-backed reads are simply absent and dependent gates degrade gracefully.</li>
+  <li>Responses are cached for 3 minutes and all watched symbols are batched into one <code>quotes/latest</code> call, to stay inside the free tier's ~333 calls/day credit budget.</li>
+  <li>When several listings share a ticker (wrapped variants), the entry with the lowest <code>cmc_rank</code> — the coin traders actually mean — wins.</li>
+</ul>
+
+<h2>Charts and indicators</h2>
+<p>The MARKET section (<code>src/panels/market/</code>: <code>MarketSection.tsx</code>, <code>TradingChart.tsx</code>, <code>CompareChart.tsx</code>, <code>IndicatorModal.tsx</code>, <code>AlertModal.tsx</code>) draws candle charts with overlays computed by <code>shared/indicators.ts</code> — the <em>same module the alert engine evaluates</em>, so an alert can never disagree with the line it was set against. Available indicator math includes:</p>
+<ul>
+  <li>Moving averages: SMA, EMA (SMA-seeded)</li>
+  <li>Momentum: RSI-14 (Wilder-smoothed), MACD (12/26/9), Stochastic, CCI, MFI</li>
+  <li>Volatility and bands: Bollinger Bands (20, 2σ, population variance), ATR, Keltner Channels, Bollinger/Keltner squeeze</li>
+  <li>Trend: ADX (+DI/−DI), Parabolic SAR, Supertrend (10, 3)</li>
+  <li>Volume and levels: OBV, VWAP, volume ratio vs 20-bar average, pivot levels, Fibonacci retracement</li>
+</ul>
+<p>The signal engine in <code>server/crypto.ts</code> combines these into multi-timeframe day/swing readings — RSI-14, MACD, Bollinger, MA20/50/200, OBV, VWAP, ADX-14, Ichimoku Cloud, and Fibonacci retracement across SHORT-TERM (15m/1hr) and MEDIUM-TERM (1day/1hr) categories — each with a direction (BUY/SELL/HOLD), an entry quality, and a confluence count.</p>
+
+<h2>Screeners</h2>
+<p>A screener is a <strong>saved question about the market</strong>, pure data defined in <code>shared/screener.ts</code>: a name, a timeframe (<code>15m</code>, <code>1hr</code>, <code>4hr</code>, <code>1day</code>, <code>1week</code>), a universe (<code>ALL</code> USD pairs or <code>HELD</code> positions only), and eleven gates in three groups:</p>
+<table>
+  <tr><th>Group</th><th>Gates</th></tr>
+  <tr><td>MARKET</td><td>market cap, 24h volume (both from CMC — degrade to ANY when unconfigured), 24h change</td></tr>
+  <tr><td>TECHNICAL</td><td>RSI range, EMA 50 trend, EMA 200 trend, MACD cross, BB width</td></tr>
+  <tr><td>PATTERN</td><td>candle-pattern whitelist (20 named patterns), pattern freshness in bars, relative volume</td></tr>
+</table>
+<p>Definitions live in <code>data/crypto/screeners.json</code> (<code>server/screenerStore.ts</code>); three starters (DIP HUNTER, OVERSOLD BLUE-CHIPS, BREAKOUT WATCH) are seeded on first boot. Running one assembles a job — the newest 400 candles per symbol, tickers, CMC market caps and volumes, held symbols — and pipes it to the deterministic Python engine in <code>engine/</code> (see the <a href="screener-engine.html">Screener Engine</a> page). Results come back as a ranked candidate table plus an elimination funnel showing which gate killed how many symbols. The HTTP surface is <code>/api/crypto/screeners</code> (<code>server/screenerApi.ts</code>); an unsaved draft can re-screen live, but the saved id in the URL always wins so a draft can never report itself as another screener's results.</p>
+<div class="callout"><span class="callout-title">Screeners are not strategies</span>
+A strategy executes — it sizes bids, places legs, manages exits. A screener only asks a question. The single bridge between them runs one way: creating a screener can <em>copy</em> a strategy's gate snapshot (SNIPER, TRAPLINE, OVERSOLD RSI, FAST CASH, FIRECRACKER presets in <code>server/screenerStore.ts</code>) as a starting point, and from that moment the copy is independent. Editing a screener can never retune a live strategy, and nothing in the screener path can place an order.
+</div>
+
+<h2>The strategy runner</h2>
+<p>Strategies are <strong>Claude Code skills</strong> — prompt documents under <code>.claude/commands/</code> — run headlessly through the Agent SDK on your Claude subscription (no per-token API billing), exactly like the Computer Core chat. <code>server/strategyRunner.ts</code> defines the selectable set:</p>
+<ul>
+  <li><code>crypto-strategy</code> — 4hr Bollinger Band swing system (BTC ladder + BB/volume alt swings)</li>
+  <li><code>btc-ladder</code> — trend-gated BTC accumulation ladder, measured in BTC</li>
+  <li><code>fast-cash</code> — 5m candle-pattern scalp, small fixed size</li>
+  <li><code>oversold</code> — 1hr RSI &lt; 30 mean reversion</li>
+  <li><code>crypto-candles</code> — the 5m pattern <em>scanner</em> that feeds fast-cash (stages nothing itself)</li>
+  <li><code>firecracker</code> — whole-market RSI/candle scalp, tiny fixed size</li>
+  <li><code>sniper</code> — precision candle swing on a historically-proven composite</li>
+  <li><code>reaper</code>, <code>trapline</code> — additional selectable skills</li>
+</ul>
+<p>Mechanics worth knowing:</p>
+<ul>
+  <li><strong>One run at a time.</strong> A manual RUN cannot collide with the hourly scheduled routine; external routines signal liveness via heartbeat pings and are presumed dead after 6 minutes of silence.</li>
+  <li><strong>Bounded.</strong> Each in-process run has a 20-minute wall clock and an 80-turn ceiling, so a wedged session cannot block every future run.</li>
+  <li><strong>The enabled strategy is persisted</strong> to <code>data/crypto/enabled-strategy.json</code>; the UI segmented control writes it and the headless routine reads it.</li>
+  <li><strong>Every run is attributed.</strong> Runs execute inside <code>withActor('skill:&lt;id&gt;')</code>, so everything the skill changes lands in the audit log under the skill's name, and each run is mirrored into the durable timeline (<code>agent_runs</code>) shown in INTELLIGENCE → timeline.</li>
+</ul>
+
+<h3>Strategy settings</h3>
+<p><code>server/cryptoStrategySettings.ts</code> stores each strategy's tuning knobs as data (<code>StrategyDefinition[]</code> in <code>data/crypto/strategy-settings.json</code>), editable from the tab's admin panel without touching prompt text — the skills read the resolved values over HTTP at the start of each run. A <code>_global</code> pseudo-strategy holds shared assumptions (round-trip fee, dust floor, exchange order minimum, liquidity floors, and the <code>confirmFirst</code> toggle); a strategy overrides a global value simply by declaring a field with the same key. New strategies can be created from the "+ NEW STRATEGY" form; the five original built-ins are seeded and their schemas reconciled on upgrade while your tuned values survive. Every settings change is written to the audit log with before/after values, so "who moved <code>rsiMax</code> to 35 — me or sniper?" stays answerable months later.</p>
+
+<h3>What actually executes</h3>
+<p>Verified against <code>server/crypto.ts</code>:</p>
+<ul>
+  <li><strong>Skills propose; the server stages.</strong> A strategy run stages steps into a confirm-first plan (<code>stageProposal → confirmProposal</code> in the AutoPlanner). Staged steps can be edited, approved, or denied per step; denied trades are never sent to the exchange.</li>
+  <li><strong>Confirmation places real orders.</strong> On confirm, the server signs authenticated requests with <code>GEMINI_API_KEY</code> / <code>GEMINI_API_SECRET</code> and posts to Gemini's <code>/v1/order/new</code> — entries, exit legs, protective stops, and bracket adjustments included.</li>
+  <li><strong>Auto-execute exists and is off by default.</strong> <code>data/crypto/auto-execute.json</code> holds <code>{ enabled: false, btcLadderMaxUsd: 100, altMaxUsd: 100, perStrategy: {} }</code>: a master switch plus per-strategy USD caps that bound what may auto-confirm without human review.</li>
+  <li><strong>Safe mode is on by default.</strong> Eligible resting SELL orders are auto-armed with a default 5% stop trigger and 0.1% exit offset unless explicitly disarmed per order.</li>
+  <li><strong>Trade lifecycle events</strong> toast to the UI and archive to the ship's log (source CRYPTO) without spamming the Computer Core chat.</li>
+</ul>
+
+<h2>Alerts</h2>
+<p>Indicator alerts (<code>server/cryptoAlerts.ts</code>, persisted to <code>data/crypto/alerts.json</code>) are evaluated <strong>on the server, inside the hub's 30-second refresh loop</strong> — they keep firing with the app closed. Conditions read from <code>shared/indicators.ts</code>, and each alert fires at most once per bar of its chosen timeframe. Sources and conditions include:</p>
+<ul>
+  <li><strong>price</strong> — crossed above/below a level, or a bar's open→close move past a percent</li>
+  <li><strong>rsi</strong> — crossed above/below a value, or exited the 30–70 band</li>
+  <li><strong>ema-cross</strong> (EMA 9/21), <strong>sma-cross</strong> (golden/death cross of SMA 50/200)</li>
+  <li><strong>macd</strong> — bull/bear cross or histogram flip</li>
+  <li><strong>bollinger</strong> — close broke the upper/lower band, or a Bollinger/Keltner squeeze</li>
+  <li><strong>stoch</strong> — %K/%D cross while oversold/overbought</li>
+  <li><strong>volume</strong> — spike or fade vs the 20-bar average; <strong>atr</strong>; <strong>adx</strong> — trend starts/fades, ±DI cross; <strong>vwap</strong> cross; <strong>supertrend</strong> flip</li>
+  <li><strong>signal</strong> — the signal engine's direction flipped, entry quality reached MEDIUM/HIGH, or confluence reached a target</li>
+</ul>
+<p>An alert's action is <code>notify</code> (toast + archive) or <code>stage-buy</code> / <code>stage-sell</code>, which stages a confirm-first proposal for a configurable USD size (default $20) — one of the few paths that reaches the confirm queue with no human in the loop, so each such fire gets its own audit entry. An alert may also name an agent to wake when it fires, independent of the action. Creators are capped at <code>ALERT_MAX_PER_CREATOR</code> alerts, and an agent denied trading authority cannot arm a trade-staging alert — the autonomy dial means the same thing whether the agent acts now or arranges to act later.</p>
+
+<h2>The audit log</h2>
+<p>Every state mutation — trades, settings changes, alert arms, screener edits — lands in an <strong>append-only, hash-chained</strong> record (<code>server/auditLog.ts</code>), kept in two places at once:</p>
+<ul>
+  <li><code>data/audit/audit-YYYY-MM.jsonl</code> — the write-ahead log, one JSON line per entry, written synchronously first. Files rotate monthly but the sha256 chain and <code>seq</code> counter continue across rotation. <strong>These files are never rewritten or trimmed</strong>; a correction is a new entry, never an edit.</li>
+  <li>Postgres <code>audit_log</code> (when <code>DATABASE_URL</code> is set) — the indexed, queryable system of record, guarded by <code>BEFORE UPDATE OR DELETE</code> and <code>BEFORE TRUNCATE</code> triggers that make it append-only regardless of privilege. Rows stream in behind the file and backfill on reconnect.</li>
+</ul>
+<p>Each entry carries an actor (<code>operator</code>, <code>system</code>, <code>skill:&lt;id&gt;</code>, <code>agent:&lt;id&gt;</code> — threaded implicitly via <code>AsyncLocalStorage</code>), an action, a resource, a summary, and optional before/after state. <code>GET /api/audit/verify</code> re-derives the whole chain and cross-checks every Postgres row against the files: an edited line, a deleted line, a torn write, or a row inserted directly into the table all show up as a named break. The AUDIT section of the tab browses the log with actor/resource/action filters, newest first.</p>
+
+<div class="callout warn"><span class="callout-title">Configuration checklist</span>
+<code>GEMINI_API_KEY</code> / <code>GEMINI_API_SECRET</code> (required for balances, orders, and anything that trades), <code>CMC_API_KEY</code> (optional — cross-exchange volume and market caps; screener MKT CAP and VOL 24H gates degrade to ANY without it), <code>CLAUDE_CODE_OAUTH_TOKEN</code> (required for strategy runs), <code>HOMUNCULUS_MODEL</code> (optional model override), <code>DATABASE_URL</code> (optional — Postgres mirrors for state, history, and the audit log). All are read from the backend's <code>.env</code> and never sent to the client.
+</div>
+
+</main>
+</div>
+
+<footer class="site-footer">Homunculus Core — starship-bridge command interface</footer>
+</body>
+</html>

@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en" data-theme="prism">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Homunculus Core Docs</title>
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="holo-rule top"></div>
+<header class="site-header">
+  <a class="wordmark" href="index.html">HOMUNCULUS CORE</a>
+  <span class="sub">Documentation</span>
+</header>
+
+<div class="layout">
+<nav class="sidebar">
+  <div class="group">Start Here</div>
+  <a href="index.html" class="active">Overview</a>
+  <a href="getting-started.html">Getting Started</a>
+  <a href="faq.html">FAQ &amp; Troubleshooting</a>
+
+  <div class="group">Using the Bridge</div>
+  <a href="widgets-layout.html">Widgets &amp; Layout</a>
+  <a href="computer-core.html">Computer Core</a>
+  <a href="tab-bridge.html">BRIDGE Tab</a>
+  <a href="tab-osint.html">OSINT Tab</a>
+  <a href="tab-home.html">HOME Tab (Home Assistant)</a>
+  <a href="tab-data.html">DATA Tab</a>
+  <a href="tab-archive.html">ARCHIVE Tab</a>
+  <a href="tab-crypto.html">CRYPTO Tab</a>
+
+  <div class="group">Deploy &amp; Operate</div>
+  <a href="deployment.html">Deployment</a>
+  <a href="configuration.html">Configuration Reference</a>
+  <a href="security.html">Security</a>
+  <a href="upgrading.html">Upgrading</a>
+
+  <div class="group">Development</div>
+  <a href="architecture.html">Architecture</a>
+  <a href="protocol.html">WebSocket Protocol</a>
+  <a href="widget-development.html">Widget Development</a>
+  <a href="backend-modules.html">Backend Modules</a>
+  <a href="screener-engine.html">Screener Engine</a>
+  <a href="contributing.html">Contributing &amp; Testing</a>
+</nav>
+
+<main class="content">
+<h1>Homunculus Core</h1>
+<p class="lede">A starship-bridge command interface for your home, computers, and data — powered by Claude. Inspired by the Enterprise computer, Jarvis, a Bond-villain control room, and the eDEX-UI terminal aesthetic.</p>
+
+<p>Homunculus Core is a hybrid client–server system: one standalone Node backend does all the work — telemetry, the Claude-powered Computer Core, a real terminal, Home Assistant, OSINT watchers, crypto market tooling, and a persistent event archive — and serves a React bridge UI that any browser, phone, or the Electron desktop shell can connect to over a single WebSocket.</p>
+
+<h2>Start Here</h2>
+<div class="card-grid">
+  <a class="card" href="getting-started.html"><span class="card-title">Getting Started</span><span class="card-desc">Install, mint a Claude subscription token, first launch, and verifying every tab lights up.</span></a>
+  <a class="card" href="faq.html"><span class="card-title">FAQ &amp; Troubleshooting</span><span class="card-desc">Blank windows, WebSocket failures, expired tokens, and other common snags.</span></a>
+</div>
+
+<h2>Using the Bridge</h2>
+<div class="card-grid">
+  <a class="card" href="widgets-layout.html"><span class="card-title">Widgets &amp; Layout</span><span class="card-desc">Rearrange, resize, and move widgets between tabs; how layout persists server-side.</span></a>
+  <a class="card" href="computer-core.html"><span class="card-title">Computer Core</span><span class="card-desc">The Claude-powered assistant: sessions, agents, intents, scheduling, and the audit log.</span></a>
+  <a class="card" href="tab-bridge.html"><span class="card-title">BRIDGE Tab</span><span class="card-desc">System vitals, the Computer Core chat, a real terminal, and Home Assistant tiles.</span></a>
+  <a class="card" href="tab-osint.html"><span class="card-title">OSINT Tab</span><span class="card-desc">Situational watchers on a 3D globe, with geofences and escalations.</span></a>
+  <a class="card" href="tab-home.html"><span class="card-title">HOME Tab</span><span class="card-desc">The full Home Assistant surface — devices, grouping, sectors, and routines.</span></a>
+  <a class="card" href="tab-data.html"><span class="card-title">DATA Tab</span><span class="card-desc">Dataset browsing and inspection.</span></a>
+  <a class="card" href="tab-archive.html"><span class="card-title">ARCHIVE Tab</span><span class="card-desc">The persistent event spool, with optional Postgres capture.</span></a>
+  <a class="card" href="tab-crypto.html"><span class="card-title">CRYPTO Tab</span><span class="card-desc">Market view, screeners, the strategy runner, alerts, and the audit log.</span></a>
+</div>
+
+<h2>Deploy &amp; Operate</h2>
+<div class="card-grid">
+  <a class="card" href="deployment.html"><span class="card-title">Deployment</span><span class="card-desc">Electron dev, browser dev, and Docker production — including Windows + Tailscale.</span></a>
+  <a class="card" href="configuration.html"><span class="card-title">Configuration Reference</span><span class="card-desc">Every environment variable and setting in one table.</span></a>
+  <a class="card" href="security.html"><span class="card-title">Security</span><span class="card-desc">Threat model, WebSocket gating, secrets storage, and the terminal risk surface.</span></a>
+  <a class="card" href="upgrading.html"><span class="card-title">Upgrading</span><span class="card-desc">Updating safely, state migrations, and rollback.</span></a>
+</div>
+
+<h2>Development</h2>
+<div class="card-grid">
+  <a class="card" href="architecture.html"><span class="card-title">Architecture</span><span class="card-desc">Process boundaries, data flow, and the decisions behind them.</span></a>
+  <a class="card" href="protocol.html"><span class="card-title">WebSocket Protocol</span><span class="card-desc">The message types that are the app's real API.</span></a>
+  <a class="card" href="widget-development.html"><span class="card-title">Widget Development</span><span class="card-desc">Build a new panel: registration, layout, and backend subscriptions.</span></a>
+  <a class="card" href="backend-modules.html"><span class="card-title">Backend Modules</span><span class="card-desc">Conventions in server/ and how a subsystem plugs into the process.</span></a>
+  <a class="card" href="screener-engine.html"><span class="card-title">Screener Engine</span><span class="card-desc">The Python engine and its contract with the Node side.</span></a>
+  <a class="card" href="contributing.html"><span class="card-title">Contributing &amp; Testing</span><span class="card-desc">Dev setup, test suites, and conventions.</span></a>
+</div>
+
+</main>
+</div>
+
+<footer class="site-footer">Homunculus Core — starship-bridge command interface</footer>
+</body>
+</html>

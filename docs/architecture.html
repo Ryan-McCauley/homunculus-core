@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en" data-theme="prism">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Architecture — Homunculus Core Docs</title>
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="holo-rule top"></div>
+<header class="site-header">
+  <a class="wordmark" href="index.html">HOMUNCULUS CORE</a>
+  <span class="sub">Documentation</span>
+</header>
+
+<div class="layout">
+<nav class="sidebar">
+  <div class="group">Start Here</div>
+  <a href="index.html">Overview</a>
+  <a href="getting-started.html">Getting Started</a>
+  <a href="faq.html">FAQ &amp; Troubleshooting</a>
+
+  <div class="group">Using the Bridge</div>
+  <a href="widgets-layout.html">Widgets &amp; Layout</a>
+  <a href="computer-core.html">Computer Core</a>
+  <a href="tab-bridge.html">BRIDGE Tab</a>
+  <a href="tab-osint.html">OSINT Tab</a>
+  <a href="tab-home.html">HOME Tab (Home Assistant)</a>
+  <a href="tab-data.html">DATA Tab</a>
+  <a href="tab-archive.html">ARCHIVE Tab</a>
+  <a href="tab-crypto.html">CRYPTO Tab</a>
+
+  <div class="group">Deploy &amp; Operate</div>
+  <a href="deployment.html">Deployment</a>
+  <a href="configuration.html">Configuration Reference</a>
+  <a href="security.html">Security</a>
+  <a href="upgrading.html">Upgrading</a>
+
+  <div class="group">Development</div>
+  <a href="architecture.html" class="active">Architecture</a>
+  <a href="protocol.html">WebSocket Protocol</a>
+  <a href="widget-development.html">Widget Development</a>
+  <a href="backend-modules.html">Backend Modules</a>
+  <a href="screener-engine.html">Screener Engine</a>
+  <a href="contributing.html">Contributing &amp; Testing</a>
+</nav>
+
+<main class="content">
+<h1>Architecture</h1>
+<p class="lede">One Node backend does all the work; every UI — browser, phone, Electron — is a thin client on the same WebSocket.</p>
+
+<h2>The shape of the system</h2>
+<p>Homunculus Core is a hybrid client–server system. A single Node process (started from <code>server/index.ts</code>) owns every subsystem: telemetry, the Computer Core chat, the PTY terminal, Home Assistant, OSINT watchers, the archive spool, the crypto engine, and persistence. It serves the built React UI over HTTP and multiplexes live data over <strong>one WebSocket per client</strong>. Clients render; they never compute.</p>
+
+<pre><code>┌─ Backend: one Node process (server/index.ts, containerizable) ──────────────┐
+│                                                                             │
+│  HTTP :8787 ── serves out/renderer (the built React UI) + /api/* routes     │
+│  WS   :8787 ── one socket per client, channels keyed by `ch`                │
+│                                                                             │
+│  ├─ telemetryHub      systeminformation snapshots      (server/telemetry.ts)│
+│  ├─ ChatSession       Computer Core — Claude Agent SDK (server/chat.ts)     │
+│  ├─ TerminalManager   real PTY, node-pty prebuilt      (server/terminal.ts) │
+│  ├─ haHub             Home Assistant REST poller       (server/homeassistant.ts)
+│  ├─ osintHub          situational watchers + geofence  (server/osint.ts)    │
+│  ├─ archiveHub        persistent event spool           (server/archive.ts)  │
+│  ├─ cryptoHub         market data, trades, autoPlanner (server/crypto.ts)   │
+│  ├─ screenerRunner ───┐ builds jobs for the engine     (server/screenerRunner.ts)
+│  ├─ stateStore        Postgres + data/*.json replica   (server/stateStore.ts)
+│  └─ auditLog          append-only hash-chained record  (server/auditLog.ts) │
+│                       │                                                     │
+│              child process, per job                                         │
+│                       ▼                                                     │
+│        ┌─ Python screener engine ─┐                                         │
+│        │  engine/screener_engine.py │  stdin: job JSON → stdout: result JSON│
+│        └───────────────────────────┘  no keys, no network, cannot trade     │
+└──────────────────────┬──────────────────────────────────────────────────────┘
+                       │ WebSocket + HTTP (over Tailscale for remote)
+          ┌────────────┼──────────────────┐
+     Browser        iPhone           Electron shell (electron/main.ts)
+     localhost:8787 tailnet + token  a window onto the same web UI
+              └── src/ React bridge, one codebase, transport-agnostic ──┘</code></pre>
+
+<h2>The backend: one process, many hubs</h2>
+<p><code>server/index.ts</code> is the composition root. It creates the HTTP server, mounts the <code>/api/*</code> REST routes, upgrades <code>/ws</code> connections, and wires each subsystem in. The subsystems follow a shared shape: a singleton "hub" (<code>telemetryHub</code>, <code>haHub</code>, <code>osintHub</code>, <code>archiveHub</code>, <code>cryptoHub</code>) that polls or watches its source and exposes <code>subscribe(handler)</code> returning an unsubscribe function. Per WebSocket connection, the server subscribes on demand and forwards snapshots down the socket; on close it unsubscribes and disposes any per-connection state (each connection gets its own <code>ChatSession</code> and <code>TerminalManager</code>).</p>
+<p>Background work runs process-wide, not per client: <code>proactiveMonitor.start()</code>, <code>osintHub.start()</code>, <code>homeWatcher.start()</code>, <code>cryptoHub.start()</code>, <code>agentFleet.startWatching()</code>, and <code>historyHub.start()</code> all begin at boot, so history capture and alerting continue with no UI connected.</p>
+
+<h2>Transport: one WebSocket, plus REST</h2>
+<p>All streaming data — telemetry ticks, chat deltas, terminal output, HA/OSINT snapshots, archive events — travels on a single multiplexed WebSocket whose JSON messages are keyed by a <code>ch</code> (channel) field. The message unions live in <code>shared/protocol.ts</code> (<code>ClientMsg</code> / <code>ServerMsg</code>) and are the wire contract for both directions. Request/response work that doesn't stream — layout persistence, crypto orders, history queries, the audit log — goes over plain HTTP <code>/api/*</code> routes on the same origin. The <a href="protocol.html">WebSocket Protocol</a> page documents both surfaces.</p>
+
+<h2>The web UI and <code>window.homunculus</code></h2>
+<p>The React bridge in <code>src/</code> is built (by <code>vite.web.config.ts</code> or the electron-vite renderer build — same artifact) and served by the backend from <code>out/renderer</code>. Before rendering, <code>src/main.tsx</code> calls <code>installTransport()</code> from <code>src/transport.ts</code>, which opens the WebSocket and installs a <code>window.homunculus</code> object of the <code>HomunculusApi</code> shape defined in <code>shared/api.ts</code>. Panels only ever talk to that object — <code>onTelemetry</code>, <code>sendChat</code>, <code>termStart</code>, <code>onArchive</code>, <code>onDisconnect</code>, and the rest — so they are transport-agnostic: the same panel code runs in a browser tab, on a phone over Tailscale, or inside the Electron window.</p>
+<p>The transport also owns resilience: capped exponential backoff with jitter on reconnect, re-issuing channel subscriptions when the socket reopens, a bounded send queue (50 messages, 30-second TTL so a stale chat turn never fires half an hour late), and synthetic <code>connection</code> events so hooks like <code>useChat</code> can unlatch when a socket dies mid-stream.</p>
+
+<h2>The Electron shell is deliberately thin</h2>
+<p><code>electron/main.ts</code> creates one <code>BrowserWindow</code> and loads the web UI from a URL — <code>http://localhost:8787</code> in production, the electron-vite dev server in dev, or <code>HOMUNCULUS_URL</code> for a remote backend. It contains no telemetry, chat, or terminal code. Its only privileged feature is the OS-keychain key vault, exposed through a sandboxed preload (<code>contextIsolation: true</code>, <code>nodeIntegration: false</code>, <code>sandbox: true</code>) and disabled entirely against remote backends so credentials never cross the wire. When no backend is running it shows an inlined waiting page (a <code>data:</code> URL, so it depends on nothing the backend would have served) and retries every 3 seconds.</p>
+
+<div class="callout"><span class="callout-title">Design decision: the Computer Core runs in plain Node</span>
+The README records this explicitly: the backend "runs in Docker. The Computer Core runs here in plain Node (not Electron's main process, which crashed)." An earlier design hosted the Claude Agent SDK session inside Electron's main process; it crashed, and the fix became the architecture — all real work moved to a standalone Node process that Electron merely connects to like any other client. The shared type headers in <code>shared/chat.ts</code> and <code>shared/terminal.ts</code> still say "main &lt;-&gt; renderer" from that era; the payloads are unchanged, only the transport moved.</div>
+
+<h2>The Python engine is a child process</h2>
+<p>The crypto screeners are evaluated by a separate Python program, <code>engine/screener_engine.py</code>. <code>server/screenerRunner.ts</code> builds a job (a pure, unit-testable function) and pipes it to the engine over stdin, reading the result from stdout — one short-lived child process per run, killed after a 30-second timeout if stuck. The comments in that file record why: a process boundary means a screener that runs long or crashes outright cannot take the trading server down, and the engine "has no keys, no network, and no path back into the order code" — it receives prices and returns opinions. The engine is deterministic (the job carries its own timestamp), and <code>engine/tests/test_parity.py</code> holds its indicator math to within 1e-9 of the TypeScript implementation in <code>shared/indicators.ts</code>.</p>
+
+<h2>Persistence: Postgres with a file replica</h2>
+<p><code>server/stateStore.ts</code> gives every hub synchronous <code>readJson</code>/<code>writeJson</code> calls keyed by paths under <code>data/</code>, while mirroring every value into a Postgres <code>app_state</code> table when <code>DATABASE_URL</code> is set. Postgres is the durable system of record; the JSON files are a synchronously written local replica that lets hubs boot before any connection exists and keeps the app fully functional with no database at all. A <code>reconcile()</code> pass at startup imports files with no row, restores rows with no file, and reports any divergence. The append-only audit log (<code>server/auditLog.ts</code>) follows the same dual-write shape and hash-chains its entries; the chain is verified at every boot.</p>
+
+<h2>Other decisions worth recording</h2>
+<ul>
+  <li><strong>Layout lives on the server, not localStorage</strong> (<code>server/layout.ts</code>), so the desktop shell and a browser over Tailscale render the same dashboard.</li>
+  <li><strong>Fail-closed auth.</strong> An unset <code>HOMUNCULUS_TOKEN</code> refuses remote callers (503) rather than waiving authentication; localhost is waived, but opening a terminal PTY always requires the real token once one is configured, even locally over the socket. A present-but-foreign <code>Origin</code> header is rejected before any token check, closing the same-machine-browser hole.</li>
+  <li><strong>Crash guards.</strong> The process holds live exchange orders in memory, so <code>unhandledRejection</code> is logged (to console and the audit log) rather than fatal, <code>uncaughtException</code> exits non-zero for a supervisor to restart, and SIGTERM/SIGINT flush the audit queue and state store before exit.</li>
+  <li><strong>node-pty ships prebuilt</strong> (<code>@homebridge/node-pty-prebuilt-multiarch</code>), so no native build toolchain is needed under Node 20.</li>
+</ul>
+
+<h2>Repository layout</h2>
+<table>
+  <tr><th>Path</th><th>What lives there</th></tr>
+  <tr><td><code>server/</code></td><td>The Node backend: <code>index.ts</code> (HTTP + WS + routing) and one module per subsystem, each with a colocated <code>.test.ts</code></td></tr>
+  <tr><td><code>shared/</code></td><td>Types shared by server and clients — <code>protocol.ts</code>, <code>api.ts</code>, and per-domain type modules (<code>telemetry.ts</code>, <code>crypto.ts</code>, <code>layout.ts</code>, …)</td></tr>
+  <tr><td><code>src/</code></td><td>The React bridge: <code>App.tsx</code>, <code>transport.ts</code>, <code>panels/</code>, <code>widgets/registry.tsx</code>, <code>components/</code>, <code>hooks/</code>, <code>lib/</code></td></tr>
+  <tr><td><code>electron/</code></td><td>The thin desktop shell (<code>main.ts</code>, <code>preload.ts</code>, <code>vault.ts</code>)</td></tr>
+  <tr><td><code>engine/</code></td><td>The Python screener engine and its stdlib-unittest suite</td></tr>
+</table>
+
+</main>
+</div>
+
+<footer class="site-footer">Homunculus Core — starship-bridge command interface</footer>
+</body>
+</html>

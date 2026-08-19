@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en" data-theme="prism">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FAQ &amp; Troubleshooting — Homunculus Core Docs</title>
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="holo-rule top"></div>
+<header class="site-header">
+  <a class="wordmark" href="index.html">HOMUNCULUS CORE</a>
+  <span class="sub">Documentation</span>
+</header>
+
+<div class="layout">
+<nav class="sidebar">
+  <div class="group">Start Here</div>
+  <a href="index.html">Overview</a>
+  <a href="getting-started.html">Getting Started</a>
+  <a href="faq.html" class="active">FAQ &amp; Troubleshooting</a>
+
+  <div class="group">Using the Bridge</div>
+  <a href="widgets-layout.html">Widgets &amp; Layout</a>
+  <a href="computer-core.html">Computer Core</a>
+  <a href="tab-bridge.html">BRIDGE Tab</a>
+  <a href="tab-osint.html">OSINT Tab</a>
+  <a href="tab-home.html">HOME Tab (Home Assistant)</a>
+  <a href="tab-data.html">DATA Tab</a>
+  <a href="tab-archive.html">ARCHIVE Tab</a>
+  <a href="tab-crypto.html">CRYPTO Tab</a>
+
+  <div class="group">Deploy &amp; Operate</div>
+  <a href="deployment.html">Deployment</a>
+  <a href="configuration.html">Configuration Reference</a>
+  <a href="security.html">Security</a>
+  <a href="upgrading.html">Upgrading</a>
+
+  <div class="group">Development</div>
+  <a href="architecture.html">Architecture</a>
+  <a href="protocol.html">WebSocket Protocol</a>
+  <a href="widget-development.html">Widget Development</a>
+  <a href="backend-modules.html">Backend Modules</a>
+  <a href="screener-engine.html">Screener Engine</a>
+  <a href="contributing.html">Contributing &amp; Testing</a>
+</nav>
+
+<main class="content">
+<h1>FAQ &amp; Troubleshooting</h1>
+<p class="lede">The failure modes people actually hit, and what each one means.</p>
+
+<h2>Desktop app</h2>
+
+<h3>The desktop app shows "NO BACKEND AT http://localhost:8787" (or a blank/error page)</h3>
+<p>The Electron shell is a <strong>client, not the whole thing</strong> — it is a window onto the backend and does not contain or start one. When nothing answers at its target URL, it shows a waiting screen and retries every 3 seconds, connecting by itself the moment the backend is up (see <code>electron/main.ts</code>). Fix: start a backend first —</p>
+<pre><code>npm run start          # from a checkout
+# or
+docker compose up</code></pre>
+<p>To point the app at a backend on another machine, launch it with <code>HOMUNCULUS_URL=http://your-host:8787</code>. (If you see Chromium's raw ERR_CONNECTION_REFUSED page instead of the waiting screen, you are on a build older than the waiting-screen fix — update.)</p>
+
+<h3>macOS says "Homunculus is damaged" or "unidentified developer"</h3>
+<p>Builds from this repo are not notarized, so Gatekeeper blocks downloaded copies. That warning is about the absent Apple signature, not the contents. Clear the quarantine flag after installing:</p>
+<pre><code>xattr -dr com.apple.quarantine /Applications/Homunculus.app</code></pre>
+<p>To produce notarized builds yourself you need a paid Apple Developer account with a Developer ID Application certificate, then <code>NOTARIZE=1 npm run dist:mac</code> with <code>APPLE_ID</code>, <code>APPLE_APP_SPECIFIC_PASSWORD</code>, and <code>APPLE_TEAM_ID</code> exported.</p>
+
+<h2>Connection &amp; auth</h2>
+
+<h3>The WebSocket won't connect from my phone / another machine</h3>
+<p>Two gates, in order:</p>
+<ol>
+  <li><strong><code>HOMUNCULUS_TOKEN</code> must be set on the server.</strong> If it isn't, the server fails closed: every non-localhost request is refused with 503 ("HOMUNCULUS_TOKEN is not configured — remote access is refused until it is set"). That is the safe failure, but it also means a broken phone view.</li>
+  <li><strong>The client must present the token</strong> — as <code>?token=...</code> in the URL (or the <code>x-homunculus-token</code> header). It gates the WebSocket upgrade and the sensitive REST routes (crypto). Bookmark the full URL, e.g. <code>http://&lt;tailscale-ip&gt;:8787/?token=&lt;HOMUNCULUS_TOKEN&gt;</code>.</li>
+</ol>
+<p>Also confirm both devices show as connected in Tailscale, and note the Docker container publishes to <code>127.0.0.1:8787</code> only by default — put it on the tailnet deliberately (<code>tailscale serve</code>, or bind the tailnet IP in <code>docker-compose.yml</code>).</p>
+
+<h3>The Computer Core says 401 / invalid credentials, or won't answer at all</h3>
+<p><code>CLAUDE_CODE_OAUTH_TOKEN</code> is missing or expired. Re-mint it and restart:</p>
+<pre><code>claude setup-token     # prints a fresh sk-ant-oat01-... token</code></pre>
+<p>Put it in <code>.env</code> (or the container env) where the <strong>backend</strong> reads it — it is a backend key, not a client one. Under Docker, run <code>.\scripts\homunculus.ps1 rebuild</code> (Windows) or restart the compose stack so the new value is picked up.</p>
+
+<h3>The embedded terminal prints "[ Terminal blocked ] HOMUNCULUS_TOKEN required to open a shell."</h3>
+<p>Opening a shell from a remote client requires <code>HOMUNCULUS_TOKEN</code>, same as the other sensitive routes. Set it in <code>.env</code> and include it in the URL you're connecting from. It fails closed by design: an unset token refuses remote shells rather than allowing them.</p>
+
+<h2>Docker</h2>
+
+<h3>System Vitals and the terminal show Linux, not my Windows/macOS host</h3>
+<p>Expected under Docker. The container is a small Linux VM, so telemetry and the embedded terminal reflect the <strong>container</strong>, not the host (see <code>WINDOWS.md</code>). Everything else — Computer Core, Crypto, OSINT, Home Assistant — works fully. If host-level metrics matter, see the commented host-scope options in <code>docker-compose.yml</code>, or run the backend natively with <code>npm run start</code> instead.</p>
+
+<h3><code>docker compose</code> aborts with "env file not found"</h3>
+<p>Compose reads <code>.env</code>; create one before the first <code>up</code>:</p>
+<pre><code>cp .env.example .env    # then fill in CLAUDE_CODE_OAUTH_TOKEN and HOMUNCULUS_TOKEN
+docker compose up --build</code></pre>
+
+<h3>My data disappeared after a rebuild</h3>
+<p>You are likely on an old <code>docker-compose.yml</code> without the <code>volumes:</code> block — pull the latest. State lives in named volumes (<code>homunculus-data</code> → <code>/app/data</code>, <code>homunculus-private</code> → <code>/app/private</code>, <code>homunculus-pg</code> for Postgres), so <code>rebuild</code>/<code>git pull</code> won't wipe it.</p>
+
+<h2>Home Assistant</h2>
+
+<h3>HOME tab mostly works, but the DEVICES tab fails with 401</h3>
+<p><code>HA_TOKEN</code> must be a long-lived access token created from an <strong>admin</strong> Home Assistant account. A token inherits the admin status of whoever made it, and a non-admin token fails in a genuinely confusing way: reading state, controlling lights, and running scenes all work perfectly — only the DEVICES tab breaks, because Home Assistant gates config flows (adding/removing integrations) on admin and answers 401. Mint a new token from an admin profile (HA → your profile → Security), update <code>HA_TOKEN</code> in <code>.env</code>, and restart. The <code>./scripts/setup-home-assistant.sh</code> / <code>.ps1</code> wizard verifies the token against <code>/api/config</code> and <code>/api/states</code> before writing anything.</p>
+
+<h2>Terminal &amp; ports</h2>
+
+<h3>The terminal won't start / node-pty problems</h3>
+<p>The terminal uses <code>@homebridge/node-pty-prebuilt-multiarch</code>, which ships prebuilt binaries — under plain Node 20 (the <code>npm run start</code> / Docker path) no native build is needed. Check you are actually on Node 20 LTS (<code>nvm use</code>, per <code>.nvmrc</code>): a different major version can miss the prebuilds. If the module was compiled against the wrong ABI for the Electron dev shell, rebuild it:</p>
+<pre><code>npm run rebuild        # electron-rebuild -f -w @homebridge/node-pty-prebuilt-multiarch</code></pre>
+<p>Also note the Terminal widget is a <strong>singleton</strong> — a second instance would fight the first over its PTY session id, so the widget picker refuses to place another.</p>
+
+<h3>Port 8787 (or 5173) is already in use</h3>
+<p>The backend defaults to <code>0.0.0.0:8787</code>; both halves are overridable in <code>.env</code>:</p>
+<pre><code># HOMUNCULUS_HOST=0.0.0.0
+# HOMUNCULUS_PORT=8787</code></pre>
+<p>If you change the port, point clients at the new one (browser URL, and <code>HOMUNCULUS_URL</code> for the desktop app). Port 5173 is the Vite dev server used only by <code>npm run dev</code>; kill the stale dev process holding it, or just use the production path (<code>npm run build:web &amp;&amp; npm run start</code>) which serves everything from :8787.</p>
+
+<h2>Other</h2>
+
+<h3>The DATA / ARCHIVE tabs show live data but keep no history</h3>
+<p>History capture is optional Postgres. Leave <code>DATABASE_URL</code> blank and the tabs run live-only. To enable with the bundled Postgres service: set <code>POSTGRES_PASSWORD</code> (compose refuses to start the database without one — there is deliberately no default), set <code>DATABASE_URL</code> to match, then <code>docker compose --profile history up -d</code>.</p>
+
+<h3>The layout got mangled — how do I get the stock arrangement back?</h3>
+<p>The server sanitises every layout it loads or receives, so corruption degrades to defaults rather than a blank app (a warning like <code>[layout] unreadable layout.json, using defaults</code> appears in the backend log). To reset deliberately, click <strong>RESET LAYOUT TO DEFAULTS</strong> in ⚙ Settings (or delete <code>data/layout.json</code> and restart) — <code>resetLayout()</code> in <code>server/layout.ts</code> drops back to the shipped arrangement.</p>
+
+<div class="callout"><span class="callout-title">Note</span> Under the Windows/Docker setup, <code>.\scripts\homunculus.ps1 logs</code> tails the backend log and <code>.\scripts\homunculus.ps1 status</code> shows container state — the first stop for anything not covered above.</div>
+
+</main>
+</div>
+
+<footer class="site-footer">Homunculus Core — starship-bridge command interface</footer>
+</body>
+</html>

@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en" data-theme="prism">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Widget Development — Homunculus Core Docs</title>
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="holo-rule top"></div>
+<header class="site-header">
+  <a class="wordmark" href="index.html">HOMUNCULUS CORE</a>
+  <span class="sub">Documentation</span>
+</header>
+
+<div class="layout">
+<nav class="sidebar">
+  <div class="group">Start Here</div>
+  <a href="index.html">Overview</a>
+  <a href="getting-started.html">Getting Started</a>
+  <a href="faq.html">FAQ &amp; Troubleshooting</a>
+
+  <div class="group">Using the Bridge</div>
+  <a href="widgets-layout.html">Widgets &amp; Layout</a>
+  <a href="computer-core.html">Computer Core</a>
+  <a href="tab-bridge.html">BRIDGE Tab</a>
+  <a href="tab-osint.html">OSINT Tab</a>
+  <a href="tab-home.html">HOME Tab (Home Assistant)</a>
+  <a href="tab-data.html">DATA Tab</a>
+  <a href="tab-archive.html">ARCHIVE Tab</a>
+  <a href="tab-crypto.html">CRYPTO Tab</a>
+
+  <div class="group">Deploy &amp; Operate</div>
+  <a href="deployment.html">Deployment</a>
+  <a href="configuration.html">Configuration Reference</a>
+  <a href="security.html">Security</a>
+  <a href="upgrading.html">Upgrading</a>
+
+  <div class="group">Development</div>
+  <a href="architecture.html">Architecture</a>
+  <a href="protocol.html">WebSocket Protocol</a>
+  <a href="widget-development.html" class="active">Widget Development</a>
+  <a href="backend-modules.html">Backend Modules</a>
+  <a href="screener-engine.html">Screener Engine</a>
+  <a href="contributing.html">Contributing &amp; Testing</a>
+</nav>
+
+<main class="content">
+<h1>Widget Development</h1>
+<p class="lede">How to add a panel to the bridge: the registry, the grid, data subscriptions, and the theme tokens.</p>
+
+<p>A widget is a zero-prop React component plus one entry in a registry. <code>src/widgets/registry.tsx</code> is the only file you must touch to make a new panel placeable — add an entry and it appears in SETTINGS → WIDGETS, draggable onto any tab.</p>
+
+<h2>How the pieces fit</h2>
+<ul>
+<li><strong><code>src/panels/</code></strong> — the component itself. One file per panel.</li>
+<li><strong><code>src/widgets/registry.tsx</code></strong> — the catalogue: id, label, category, default and minimum grid footprint, and a <code>render()</code> thunk.</li>
+<li><strong><code>src/components/WidgetGrid.tsx</code></strong> — the 12-column grid that places, moves, resizes, and compacts them.</li>
+<li><strong><code>src/hooks/</code></strong> — subscription hooks over <code>window.homunculus</code>.</li>
+<li><strong><code>src/lib/</code></strong> — typed REST clients for the <code>/api/</code> surface.</li>
+</ul>
+
+<h2>Why widgets take no props</h2>
+<p>Panels differ in what they need — a telemetry snapshot, HA entities, crypto positions, nothing at all. Rather than plumb props through the grid, each registry entry renders from <code>useWidgetContext()</code>. From the grid point of view every widget is a zero-prop component, so placement stays generic.</p>
+
+<pre><code>export interface WidgetContextValue {
+  telemetry: TelemetrySnapshot | null
+  haEntities: HaEntity[]
+  sendHaCmd: (entityId: string, service: string, data: Record&lt;string, unknown&gt;) =&gt; void
+  crypto: ReturnType&lt;typeof useCryptoPositions&gt;
+}</code></pre>
+
+<p>The provider is installed once, at the top of <code>App.tsx</code>. If your panel needs data that is not in the context, subscribe to it yourself with a hook rather than widening the context — see below.</p>
+
+<h2>The registry entry</h2>
+<pre><code>export interface WidgetDef {
+  id: string
+  label: string
+  /** Grouping in the widget picker. */
+  category: 'CORE' | 'HOME' | 'CRYPTO' | 'DASHBOARD' | 'MISC'
+  /** Default grid footprint when dropped fresh (12-col grid, ROW_H units). */
+  defaultW: number
+  defaultH: number
+  minW: number
+  minH: number
+  /** Some panels are singletons — a second Terminal instance would fight the
+   *  first over its PTY session id. */
+  singleton?: boolean
+  render: () =&gt; JSX.Element | null
+}</code></pre>
+
+<table>
+<tr><th>Field</th><th>Guidance</th></tr>
+<tr><td><code>id</code></td><td>Dotted namespace — <code>system.vitals</code>, <code>core.terminal</code>, <code>dash.crypto</code>. This id is written into <code>data/layout.json</code>, so <strong>changing it orphans existing placements</strong>.</td></tr>
+<tr><td><code>category</code></td><td>Picker grouping, rendered in the order <code>CORE</code>, <code>DASHBOARD</code>, <code>HOME</code>, <code>CRYPTO</code>, <code>MISC</code>.</td></tr>
+<tr><td><code>defaultW</code> / <code>defaultH</code></td><td>Footprint when dropped fresh. Width is in columns out of 12; height is in row units. Small tiles are typically 2×4; a full-bleed dashboard is 12×24.</td></tr>
+<tr><td><code>minW</code> / <code>minH</code></td><td>Resize floor. Set it where your panel stops being readable, not at 1×1.</td></tr>
+<tr><td><code>singleton</code></td><td>Set it when two instances would conflict over shared state — the Terminal fights over its PTY session id, and each whole-tab dashboard owns its own subscriptions.</td></tr>
+</table>
+
+<h2>Grid behaviour worth knowing</h2>
+<p>The grid is 12 columns with drag-to-move, drag-to-resize, and vertical compaction. There is no third-party grid dependency.</p>
+<ul>
+<li><strong>Rows are elastic while the layout still fits.</strong> If the tallest widget bottom edge is within <code>FIT_ROWS</code> (24), row height stretches so content fills the pane exactly — that is what makes a single full-width dashboard look identical to the hardcoded full-bleed body it replaced. Past that, the grid falls back to a fixed row height and scrolls, so a genuinely tall dashboard is not squashed.</li>
+<li><strong>Compaction pulls everything as far up as it will go</strong>, preserving left-to-right order.</li>
+<li><strong>Nothing is draggable until edit mode is on.</strong> A stray mousedown on a live trading panel must never reflow the dashboard.</li>
+</ul>
+
+<h2>Getting data</h2>
+
+<h3>Streaming data — hooks over the WebSocket</h3>
+<p>Every live channel already has a hook in <code>src/hooks/</code>: <code>useTelemetry</code>, <code>useHomeAssistant</code>, <code>useOsint</code>, <code>useArchive</code>, <code>useChat</code>, <code>useCryptoPositions</code>, <code>useLayout</code>, <code>useSecrets</code>, <code>useProactiveToasts</code>, <code>useHomeRoute</code>, <code>useTheme</code>. They all follow the same shape — subscribe in an effect, return the unsubscribe:</p>
+
+<pre><code>export function useTelemetry(): TelemetrySnapshot | null {
+  const [snapshot, setSnapshot] = useState&lt;TelemetrySnapshot | null&gt;(null)
+
+  useEffect(() =&gt; {
+    // Guard for running the renderer outside Electron (e.g. plain browser).
+    if (!window.homunculus) return
+    const unsubscribe = window.homunculus.onTelemetry(setSnapshot)
+    return unsubscribe
+  }, [])
+
+  return snapshot
+}</code></pre>
+
+<div class="callout warn"><span class="callout-title">Warning</span> Always guard on <code>window.homunculus</code> and always return the unsubscribe. The transport reconnects with backoff, and a leaked listener survives the reconnect and double-fires.</div>
+
+<h3>Request/response data — the lib clients</h3>
+<p>Anything on the REST surface goes through a typed client in <code>src/lib/</code> — <code>api.ts</code>, <code>cryptoApi.ts</code>, <code>agentApi.ts</code>, <code>agentsApi.ts</code>, <code>devicesApi.ts</code>, <code>blockersApi.ts</code>. Add your call there rather than calling <code>fetch</code> from a panel: the clients carry the token handling and have colocated tests.</p>
+
+<h3>Adding a new channel</h3>
+<p>If your widget needs data that does not exist yet, the change spans the stack — add the message to <code>shared/protocol.ts</code> and <code>shared/api.ts</code>, implement it in a server module, expose it in <code>src/transport.ts</code>, then write the hook. See <a href="backend-modules.html">Backend Modules</a> and <a href="protocol.html">the protocol reference</a>.</p>
+
+<h2>Styling</h2>
+<p>All colour, typography, and chrome come from CSS custom properties defined in <code>src/styles/global.css</code>. <strong>Never hardcode a colour.</strong> A literal hex breaks the moment someone switches theme.</p>
+
+<h3>Themes</h3>
+<p>Three themes ship, selected by <code>useTheme()</code> and applied as a <code>data-theme</code> attribute on the root, persisted to <code>localStorage</code>:</p>
+<table>
+<tr><th>Id</th><th>Label</th><th>Character</th></tr>
+<tr><td><code>matrix</code></td><td>MATRIX ◈</td><td>The default — phosphor green on near-black, crimson reserved for alerts.</td></tr>
+<tr><td><code>occult</code></td><td>OCCULT ⛧</td><td>Tactical night red: near-black with deep blood tints, readable in darkness.</td></tr>
+<tr><td><code>prism</code></td><td>PRISM ◇</td><td>Iridescent light-field over deep indigo-black, with animated rainbow sweeps on decorative edges. These docs use it.</td></tr>
+</table>
+<p>Because every theme redefines the same token names, a panel written against the tokens themes itself for free.</p>
+
+<h3>Tokens you will reach for</h3>
+<table>
+<tr><th>Token</th><th>Use</th></tr>
+<tr><td><code>--bg</code>, <code>--bg-panel</code>, <code>--bg-elev</code>, <code>--bg-meter</code></td><td>Backgrounds, increasing elevation.</td></tr>
+<tr><td><code>--green</code>, <code>--green-soft</code>, <code>--green-dim</code></td><td>Primary accent, body text, muted text. Named for the default theme; each theme redefines them (in PRISM the primary is cyan).</td></tr>
+<tr><td><code>--crimson</code>, <code>--amber</code>, <code>--cool-color</code></td><td>Alert, warning, and cool-status accents.</td></tr>
+<tr><td><code>--border</code>, <code>--border-strong</code>, <code>--glow-green</code>, <code>--glow-text</code></td><td>Edges and glows.</td></tr>
+<tr><td><code>--font-mono</code>, <code>--font-display</code>, <code>--font-wordmark</code></td><td>Body, panel labels, and the logo. <code>--font-wordmark</code> is a hairline face — never below ~18px or for running text.</td></tr>
+<tr><td><code>--ind-fast</code>, <code>--ind-slow</code>, <code>--ind-band</code>, <code>--ind-rsi</code>, <code>--ind-cost</code></td><td>Chart indicator palette, kept distinct from candle colours.</td></tr>
+</table>
+
+<h3>Structural classes</h3>
+<p><code>panel-label</code> for the header strip, <code>holo</code> / <code>holo-h</code> / <code>holo-v</code> / <code>holo-bar</code> for holographic tiles and meters, <code>muted</code> and <code>alert</code> for de-emphasised and alarming text. Under PRISM the <code>holo-*</code> classes and <code>panel-label</code> pick up the animated iridescent sweep automatically.</p>
+
+<h2>A worked example</h2>
+<p>A tile showing uptime from the telemetry snapshot.</p>
+
+<p><strong>1. The panel</strong> — <code>src/panels/UptimeTile.tsx</code>:</p>
+<pre><code>import { useWidgetContext } from '../widgets/registry'
+
+export function UptimeTile(): JSX.Element {
+  const { telemetry } = useWidgetContext()
+  if (!telemetry) return &lt;div className="panel-label muted"&gt;UPTIME · —&lt;/div&gt;
+
+  const hours = Math.floor(telemetry.uptimeSec / 3600)
+  return (
+    &lt;div className="holo"&gt;
+      &lt;div className="panel-label"&gt;UPTIME&lt;/div&gt;
+      &lt;div style={{ color: 'var(--green)', fontFamily: 'var(--font-display)' }}&gt;
+        {hours}h
+      &lt;/div&gt;
+    &lt;/div&gt;
+  )
+}</code></pre>
+
+<p><strong>2. The registry entry</strong> — in <code>src/widgets/registry.tsx</code>:</p>
+<pre><code>import { UptimeTile } from '../panels/UptimeTile'
+
+def({
+  id: 'system.uptime', label: 'Uptime', category: 'CORE',
+  defaultW: 2, defaultH: 4, minW: 2, minH: 3,
+  render: () =&gt; &lt;UptimeTile /&gt;,
+}),</code></pre>
+
+<p>That is the whole change. The widget now appears in SETTINGS → WIDGETS under CORE and can be dropped on any tab. Verify the field you read actually exists on <code>TelemetrySnapshot</code> in <code>shared/telemetry.ts</code> — the type is the contract.</p>
+
+<h2>Checklist</h2>
+<ul>
+<li>Component takes no props and reads from <code>useWidgetContext()</code> or its own hook.</li>
+<li>Registry entry added with a stable dotted id.</li>
+<li><code>minW</code> / <code>minH</code> set where the panel stops being readable.</li>
+<li><code>singleton: true</code> if two instances would conflict.</li>
+<li>No hardcoded colours — tokens only.</li>
+<li>Renders sensibly with null or empty data; the socket may not have delivered yet.</li>
+<li>Every subscription returns its unsubscribe.</li>
+<li><code>npm run typecheck</code> passes.</li>
+</ul>
+
+</main>
+</div>
+
+<footer class="site-footer">Homunculus Core — starship-bridge command interface</footer>
+</body>
+</html>

@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en" data-theme="prism">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebSocket Protocol — Homunculus Core Docs</title>
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="holo-rule top"></div>
+<header class="site-header">
+  <a class="wordmark" href="index.html">HOMUNCULUS CORE</a>
+  <span class="sub">Documentation</span>
+</header>
+
+<div class="layout">
+<nav class="sidebar">
+  <div class="group">Start Here</div>
+  <a href="index.html">Overview</a>
+  <a href="getting-started.html">Getting Started</a>
+  <a href="faq.html">FAQ &amp; Troubleshooting</a>
+
+  <div class="group">Using the Bridge</div>
+  <a href="widgets-layout.html">Widgets &amp; Layout</a>
+  <a href="computer-core.html">Computer Core</a>
+  <a href="tab-bridge.html">BRIDGE Tab</a>
+  <a href="tab-osint.html">OSINT Tab</a>
+  <a href="tab-home.html">HOME Tab (Home Assistant)</a>
+  <a href="tab-data.html">DATA Tab</a>
+  <a href="tab-archive.html">ARCHIVE Tab</a>
+  <a href="tab-crypto.html">CRYPTO Tab</a>
+
+  <div class="group">Deploy &amp; Operate</div>
+  <a href="deployment.html">Deployment</a>
+  <a href="configuration.html">Configuration Reference</a>
+  <a href="security.html">Security</a>
+  <a href="upgrading.html">Upgrading</a>
+
+  <div class="group">Development</div>
+  <a href="architecture.html">Architecture</a>
+  <a href="protocol.html" class="active">WebSocket Protocol</a>
+  <a href="widget-development.html">Widget Development</a>
+  <a href="backend-modules.html">Backend Modules</a>
+  <a href="screener-engine.html">Screener Engine</a>
+  <a href="contributing.html">Contributing &amp; Testing</a>
+</nav>
+
+<main class="content">
+<h1>WebSocket Protocol</h1>
+<p class="lede">The message contract between the backend and any client — enough to build a third-party one.</p>
+
+<p>One WebSocket at <code>/ws</code> multiplexes telemetry, the Computer Core chat, the terminal, Home Assistant, OSINT, and the archive. Everything else — crypto, history, layout, routines, secrets, audit — is REST under <code>/api/</code>. The authoritative definitions are <code>shared/protocol.ts</code> (the wire types) and <code>shared/api.ts</code> (the client-facing shape), which is exactly what the shipped web client consumes.</p>
+
+<h2>Connecting</h2>
+<p>The endpoint is <code>/ws</code> on the backend host and port (default <code>8787</code>). The reference client resolves it like this (<code>src/transport.ts</code>):</p>
+<ul>
+<li>Same-origin by default: <code>ws://</code> or <code>wss://</code> matching the page protocol.</li>
+<li>In Vite dev the page is on <code>5173</code> while the backend is on <code>8787</code>, so the client redirects to <code>ws://&lt;hostname&gt;:8787/ws</code>.</li>
+<li>A token, when present, is appended as a <code>token</code> query parameter.</li>
+</ul>
+
+<pre><code>ws://localhost:8787/ws
+wss://homunculus.your-tailnet.ts.net/ws?token=&lt;HOMUNCULUS_TOKEN&gt;</code></pre>
+
+<h3>Authentication</h3>
+<p>There is no in-band handshake — the gate is applied at the HTTP upgrade. Requests judged local are admitted unconditionally. Remote requests must present <code>HOMUNCULUS_TOKEN</code> as <code>?token=…</code> or an <code>x-homunculus-token</code> header, compared in constant time. If the server has no token configured, remote upgrades are refused with <code>503</code>; a wrong token gets <code>401</code>. See <a href="security.html">Security</a>.</p>
+
+<h2>Envelope</h2>
+<p>Every frame is JSON with two required fields: <code>ch</code> (the channel) and <code>type</code> (the message within that channel). All other fields are per-message. There is no request id, no envelope wrapper, and no batching — a message is the whole frame.</p>
+
+<pre><code>{ "ch": "telemetry", "type": "subscribe" }
+{ "ch": "chat", "type": "send", "id": "turn-7", "text": "status report" }</code></pre>
+
+<p>Subscription channels follow one pattern: send <code>subscribe</code> once, then receive pushes until the socket closes. Subscriptions do not survive a reconnect — the client re-sends them on <code>open</code>.</p>
+
+<h2>Client → server</h2>
+
+<h3>telemetry</h3>
+<table>
+<tr><th>Message</th><th>Payload</th><th>Meaning</th></tr>
+<tr><td><code>subscribe</code></td><td>—</td><td>Begin receiving <code>telemetry:update</code> pushes.</td></tr>
+</table>
+
+<h3>chat — the Computer Core</h3>
+<table>
+<tr><th>Message</th><th>Payload</th><th>Meaning</th></tr>
+<tr><td><code>status</code></td><td>—</td><td>Request the current <code>ChatStatus</code>; answered by <code>chat:status</code>.</td></tr>
+<tr><td><code>send</code></td><td><code>id: string</code>, <code>text: string</code></td><td>Start a turn. The <code>id</code> is client-chosen and correlates every subsequent delta, done, or error for this turn.</td></tr>
+</table>
+
+<h3>term — the embedded terminal</h3>
+<table>
+<tr><th>Message</th><th>Payload</th><th>Meaning</th></tr>
+<tr><td><code>start</code></td><td><code>id</code>, <code>cols</code>, <code>rows</code></td><td>Open a PTY session under a client-chosen id.</td></tr>
+<tr><td><code>input</code></td><td><code>id</code>, <code>data</code></td><td>Write keystrokes to the PTY.</td></tr>
+<tr><td><code>resize</code></td><td><code>id</code>, <code>cols</code>, <code>rows</code></td><td>Resize the PTY.</td></tr>
+<tr><td><code>kill</code></td><td><code>id</code></td><td>Terminate the session.</td></tr>
+</table>
+
+<h3>ha — Home Assistant</h3>
+<table>
+<tr><th>Message</th><th>Payload</th><th>Meaning</th></tr>
+<tr><td><code>subscribe</code></td><td>—</td><td>Begin receiving <code>ha:update</code> snapshots.</td></tr>
+<tr><td><code>command</code></td><td><code>entityId</code>, <code>service</code>, <code>data</code></td><td>Call a Home Assistant service against an entity. Acknowledged by <code>ha:command_ack</code>.</td></tr>
+</table>
+
+<h3>osint</h3>
+<table>
+<tr><th>Message</th><th>Payload</th><th>Meaning</th></tr>
+<tr><td><code>subscribe</code></td><td>—</td><td>Begin receiving <code>osint:update</code> snapshots.</td></tr>
+<tr><td><code>refresh</code></td><td>—</td><td>Force an out-of-cycle poll of the watchers.</td></tr>
+<tr><td><code>geofence</code></td><td><code>config: GeofenceConfig</code></td><td>Push the armed perimeter to the hub, which enforces it server-side.</td></tr>
+</table>
+
+<h3>archive</h3>
+<table>
+<tr><th>Message</th><th>Payload</th><th>Meaning</th></tr>
+<tr><td><code>subscribe</code></td><td>—</td><td>Receive an <code>archive:snapshot</code> of recent events, then live <code>archive:event</code> pushes.</td></tr>
+</table>
+
+<h2>Server → client</h2>
+
+<table>
+<tr><th>Channel</th><th>Message</th><th>Payload</th><th>Meaning</th></tr>
+<tr><td>telemetry</td><td><code>update</code></td><td><code>snapshot: TelemetrySnapshot</code></td><td>Periodic host vitals.</td></tr>
+<tr><td>chat</td><td><code>status</code></td><td><code>status: ChatStatus</code></td><td>Whether the Computer Core is configured and ready.</td></tr>
+<tr><td>chat</td><td><code>delta</code></td><td><code>id</code>, <code>delta: string</code></td><td>A streamed fragment of the assistant reply for that turn.</td></tr>
+<tr><td>chat</td><td><code>done</code></td><td><code>id</code>, <code>stopReason: string | null</code></td><td>The turn is complete.</td></tr>
+<tr><td>chat</td><td><code>error</code></td><td><code>id</code>, <code>message</code></td><td>The turn failed. No <code>done</code> follows.</td></tr>
+<tr><td>chat</td><td><code>proactive</code></td><td><code>id</code>, <code>text</code>, <code>meta?: ProactiveMeta</code></td><td>An unsolicited message from the bridge — an OSINT escalation, a device event, an alert. Also what feeds the archive.</td></tr>
+<tr><td>term</td><td><code>data</code></td><td><code>id</code>, <code>data: string</code></td><td>PTY output, coalesced server-side.</td></tr>
+<tr><td>term</td><td><code>exit</code></td><td><code>id</code>, <code>exitCode: number</code></td><td>The session ended.</td></tr>
+<tr><td>ha</td><td><code>update</code></td><td><code>snapshot: HaSnapshot</code></td><td>Current entity states.</td></tr>
+<tr><td>ha</td><td><code>command_ack</code></td><td><code>ok: boolean</code>, <code>error?: string</code></td><td>Result of a service call.</td></tr>
+<tr><td>osint</td><td><code>update</code></td><td><code>snapshot: OsintSnapshot</code></td><td>Current watcher state — contacts, escalations, geofence status.</td></tr>
+<tr><td>archive</td><td><code>snapshot</code></td><td><code>snapshot: ArchiveSnapshot</code></td><td>The most recent slice on subscribe — up to 300 events, newest first.</td></tr>
+<tr><td>archive</td><td><code>event</code></td><td><code>event: ArchiveEvent</code></td><td>One newly recorded event.</td></tr>
+</table>
+
+<h3>ProactiveMeta</h3>
+<p>Attached to a proactive message so the archive can classify it. When omitted the hub falls back to <code>SYSTEM</code> / <code>notice</code> with a derived title.</p>
+<table>
+<tr><th>Field</th><th>Type</th><th>Meaning</th></tr>
+<tr><td><code>source</code></td><td><code>OSINT | HOME | COMPUTER | CRYPTO | FINANCE | SYSTEM</code></td><td>Originating subsystem; drives the source filter.</td></tr>
+<tr><td><code>severity</code></td><td><code>info | notice | warn | critical</code></td><td>Severity, low to high; drives colour and the severity filter.</td></tr>
+<tr><td><code>title</code></td><td><code>string?</code></td><td>Event title. Derived from the text when absent.</td></tr>
+<tr><td><code>icon</code></td><td><code>string?</code></td><td>Tabler icon name for the toast, e.g. <code>ti-wash</code>.</td></tr>
+<tr><td><code>sub</code></td><td><code>string?</code></td><td>Toast subtitle. Not stored in the archive body.</td></tr>
+<tr><td><code>chatLog</code></td><td><code>boolean?</code></td><td>Defaults true. When false the event toasts and archives but is not injected into the Computer Core conversation — device and crypto events set this false to avoid spamming the chat.</td></tr>
+</table>
+
+<h2>Client behaviour worth copying</h2>
+<p>The reference transport handles three things a naive client gets wrong:</p>
+<ul>
+<li><strong>Re-subscribe on reconnect.</strong> Subscriptions are per-socket. The client tracks which channels it subscribed to and replays them in <code>onopen</code>.</li>
+<li><strong>Bounded, expiring send queue.</strong> Messages sent while the socket is down are queued to a maximum of 50 entries with a 30-second TTL. The TTL is a safety property, not tidiness: a chat turn typed during an outage should not start a Claude session — one that can stage trades — half an hour later, unprompted.</li>
+<li><strong>Surface disconnects to consumers.</strong> A socket dying mid-stream means an in-flight chat turn or terminal session will never receive its terminating message. <code>onDisconnect</code> / <code>onReconnect</code> exist so consumers stop waiting for a <code>done</code> that is not coming.</li>
+</ul>
+<p>Reconnect uses exponential backoff from 1s to 30s, reset on a successful connection.</p>
+
+<h2>The REST surface</h2>
+<p>Everything not on the socket is REST. All routes are subject to the same token gate; audit management additionally requires the admin token.</p>
+<table>
+<tr><th>Area</th><th>Representative routes</th></tr>
+<tr><td>Build identity</td><td><code>GET /api/version</code></td></tr>
+<tr><td>Layout</td><td><code>GET/POST /api/layout</code>, <code>POST /api/layout/reset</code></td></tr>
+<tr><td>Setup &amp; state</td><td><code>/api/setup</code>, <code>/api/state</code></td></tr>
+<tr><td>Secrets</td><td><code>/api/secrets</code>, <code>/api/secrets/unlock</code> <em>(localhost only)</em></td></tr>
+<tr><td>History (DATA tab)</td><td><code>/api/history/telemetry</code>, <code>/api/history/ha</code>, <code>/api/history/entities</code></td></tr>
+<tr><td>Home Assistant config flow</td><td><code>/api/ha/integrations</code>, <code>/api/ha/discovered</code>, <code>/api/ha/entries/:entry</code>, <code>/api/ha/flow/:flow</code></td></tr>
+<tr><td>Routines</td><td><code>/api/routines</code>, <code>/api/routine/:name</code></td></tr>
+<tr><td>Proactive</td><td><code>/api/proactive/say</code>, <code>/api/proactive/trigger</code></td></tr>
+<tr><td>Agents</td><td><code>/api/agent/manifest</code>, <code>/api/agent/intent</code>, <code>/api/claude/running</code>, <code>/api/claude/stop-all</code></td></tr>
+<tr><td>Audit</td><td><code>/api/audit</code>, <code>/api/audit/files</code>, <code>/api/audit/verify</code>, <code>/api/audit/annotate</code> <em>(admin token)</em></td></tr>
+<tr><td>Sync</td><td><code>/api/sync/manifest</code>, <code>/api/sync/file</code>, <code>/api/sync/config</code>, <code>/api/sync/run</code></td></tr>
+<tr><td>Crypto</td><td><code>/api/crypto/snapshot</code>, <code>/api/crypto/positions</code>, <code>/api/crypto/candles/…</code>, <code>/api/crypto/screeners</code>, <code>/api/crypto/strategy/*</code>, <code>/api/crypto/bracket/*</code>, <code>/api/crypto/autoplan/*</code>, <code>/api/crypto/trade/…</code>, <code>/api/crypto/order/…</code></td></tr>
+</table>
+
+<div class="callout warn"><span class="callout-title">Warning</span> The crypto routes include order placement and trade staging. A third-party client holding <code>HOMUNCULUS_TOKEN</code> can spend real money through them.</div>
+
+<h2>Minimal client</h2>
+<pre><code>const ws = new WebSocket('ws://localhost:8787/ws')
+
+ws.onopen = () =&gt; {
+  ws.send(JSON.stringify({ ch: 'telemetry', type: 'subscribe' }))
+  ws.send(JSON.stringify({ ch: 'archive', type: 'subscribe' }))
+}
+
+ws.onmessage = (e) =&gt; {
+  const msg = JSON.parse(e.data)
+  if (msg.ch === 'telemetry' &amp;&amp; msg.type === 'update') {
+    console.log('vitals', msg.snapshot)
+  }
+  if (msg.ch === 'archive' &amp;&amp; msg.type === 'event') {
+    console.log(msg.event.severity, msg.event.title)
+  }
+}</code></pre>
+<p>Because <code>shared/protocol.ts</code> is a discriminated union on <code>ch</code> + <code>type</code>, a TypeScript client that imports <code>ClientMsg</code> and <code>ServerMsg</code> gets exhaustiveness checking for free.</p>
+
+</main>
+</div>
+
+<footer class="site-footer">Homunculus Core — starship-bridge command interface</footer>
+</body>
+</html>

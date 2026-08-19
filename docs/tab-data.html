@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en" data-theme="prism">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DATA Tab — Homunculus Core Docs</title>
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="holo-rule top"></div>
+<header class="site-header">
+  <a class="wordmark" href="index.html">HOMUNCULUS CORE</a>
+  <span class="sub">Documentation</span>
+</header>
+
+<div class="layout">
+<nav class="sidebar">
+  <div class="group">Start Here</div>
+  <a href="index.html">Overview</a>
+  <a href="getting-started.html">Getting Started</a>
+  <a href="faq.html">FAQ &amp; Troubleshooting</a>
+
+  <div class="group">Using the Bridge</div>
+  <a href="widgets-layout.html">Widgets &amp; Layout</a>
+  <a href="computer-core.html">Computer Core</a>
+  <a href="tab-bridge.html">BRIDGE Tab</a>
+  <a href="tab-osint.html">OSINT Tab</a>
+  <a href="tab-home.html">HOME Tab (Home Assistant)</a>
+  <a href="tab-data.html" class="active">DATA Tab</a>
+  <a href="tab-archive.html">ARCHIVE Tab</a>
+  <a href="tab-crypto.html">CRYPTO Tab</a>
+
+  <div class="group">Deploy &amp; Operate</div>
+  <a href="deployment.html">Deployment</a>
+  <a href="configuration.html">Configuration Reference</a>
+  <a href="security.html">Security</a>
+  <a href="upgrading.html">Upgrading</a>
+
+  <div class="group">Development</div>
+  <a href="architecture.html">Architecture</a>
+  <a href="protocol.html">WebSocket Protocol</a>
+  <a href="widget-development.html">Widget Development</a>
+  <a href="backend-modules.html">Backend Modules</a>
+  <a href="screener-engine.html">Screener Engine</a>
+  <a href="contributing.html">Contributing &amp; Testing</a>
+</nav>
+
+<main class="content">
+<h1>DATA Tab</h1>
+<p class="lede">The metrics warehouse — time-series history for system telemetry and Home Assistant numerics.</p>
+
+<p>The DATA tab is the metrics warehouse — a time-series browser over everything the bridge has recorded about itself and your house. Pick a source, pick a range, get a phosphor line chart with statistics. It is backed by <code>HistoryHub</code> (<code>server/history.ts</code>) and reached over the <code>/api/history/*</code> REST endpoints rather than the WebSocket.</p>
+
+<div class="callout warn"><span class="callout-title">Warning</span> The DATA tab needs <code>DATABASE_URL</code>. History is written to Postgres, and with no database configured there is nothing to chart — the rest of the app works normally, but this tab has no data to show. See <a href="configuration.html">Configuration</a> for enabling the bundled Postgres service.</div>
+
+<h2>What gets recorded</h2>
+<p><code>HistoryHub</code> tees from the telemetry hub and the Home Assistant hub into Postgres. Writes are fire-and-forget — errors are logged, never thrown — so a database hiccup can never affect the live UI.</p>
+
+<h3>System telemetry metrics</h3>
+<p>Seven numeric series, whitelisted by column name (which also prevents SQL injection in the dynamic column selection):</p>
+<table>
+<tr><th>Key</th><th>Label</th><th>Unit</th></tr>
+<tr><td><code>cpu_load</code></td><td>CPU LOAD</td><td>%</td></tr>
+<tr><td><code>cpu_temp_c</code></td><td>CPU TEMP</td><td>°C</td></tr>
+<tr><td><code>mem_pct</code></td><td>MEMORY</td><td>%</td></tr>
+<tr><td><code>swap_pct</code></td><td>SWAP</td><td>%</td></tr>
+<tr><td><code>rx_mbps</code></td><td>NET RX</td><td>Mb/s</td></tr>
+<tr><td><code>tx_mbps</code></td><td>NET TX</td><td>Mb/s</td></tr>
+<tr><td><code>storage_pct</code></td><td>STORAGE</td><td>%</td></tr>
+</table>
+
+<h3>Home Assistant entities</h3>
+<p>Any Home Assistant entity with a numeric state is recorded too — temperatures, humidity, power draw, battery levels. The entity browser lists what has actually been captured (<code>GET /api/history/entities</code>), so the list grows as your house reports.</p>
+
+<div class="callout"><span class="callout-title">Note</span> Only numerics are stored. An entity whose state is <code>on</code>/<code>off</code> or a text string has nothing to plot and will not appear in the browser.</div>
+
+<h2>Using the tab</h2>
+
+<h3>Pick a source</h3>
+<p>A source is either a telemetry metric or a Home Assistant entity id. The chart re-fetches whenever you change it.</p>
+
+<h3>Pick a range</h3>
+<p>Five presets, each with its own point limit so a long range stays responsive:</p>
+<table>
+<tr><th>Range</th><th>Window</th><th>Point limit</th></tr>
+<tr><td>1H</td><td>1 hour</td><td>1200</td></tr>
+<tr><td>6H</td><td>6 hours</td><td>1500</td></tr>
+<tr><td>24H</td><td>1 day</td><td>2000</td></tr>
+<tr><td>7D</td><td>1 week</td><td>3000</td></tr>
+<tr><td>30D</td><td>30 days</td><td>5000</td></tr>
+</table>
+
+<h3>Read the chart</h3>
+<p>The series renders as a phosphor line chart. Percentage metrics are drawn against a fixed 0–100 axis; unbounded ones (temperature, throughput) autoscale. Four stat tiles summarise the visible window: <strong>min</strong>, <strong>max</strong>, <strong>avg</strong>, and <strong>now</strong>.</p>
+
+<h3>LIVE</h3>
+<p>The LIVE toggle short-polls the tail of the series every 4 seconds, so a chart left open keeps advancing. Turn it off when you are reading a historical window and do not want the view moving under you.</p>
+
+<h2>Endpoints behind the tab</h2>
+<table>
+<tr><th>Route</th><th>Returns</th></tr>
+<tr><td><code>GET /api/history/telemetry</code></td><td>Points for one telemetry metric over a time range.</td></tr>
+<tr><td><code>GET /api/history/ha</code></td><td>Points for one Home Assistant entity over a time range.</td></tr>
+<tr><td><code>GET /api/history/entities</code></td><td>The list of HA entity ids that have recorded numeric history.</td></tr>
+</table>
+<p>All three are token-gated like the rest of the REST surface — see <a href="protocol.html">the protocol reference</a>.</p>
+
+<h2>Placing it elsewhere</h2>
+<p>The tab body is the <code>dash.data</code> widget ("DATA dashboard"). Like the other dashboards it is a singleton but can be moved, resized, or stacked next to other widgets on any tab from SETTINGS → WIDGETS. See <a href="widgets-layout.html">Widgets &amp; Layout</a>.</p>
+
+<h2>Related</h2>
+<ul>
+<li><a href="tab-archive.html">ARCHIVE tab</a> — discrete events rather than continuous series. DATA answers "what was the CPU doing at 3am"; ARCHIVE answers "what happened at 3am".</li>
+<li><a href="tab-bridge.html">BRIDGE tab</a> — the live view of the same telemetry.</li>
+</ul>
+
+</main>
+</div>
+
+<footer class="site-footer">Homunculus Core — starship-bridge command interface</footer>
+</body>
+</html>

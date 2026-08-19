@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en" data-theme="prism">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Upgrading — Homunculus Core Docs</title>
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="holo-rule top"></div>
+<header class="site-header">
+  <a class="wordmark" href="index.html">HOMUNCULUS CORE</a>
+  <span class="sub">Documentation</span>
+</header>
+
+<div class="layout">
+<nav class="sidebar">
+  <div class="group">Start Here</div>
+  <a href="index.html">Overview</a>
+  <a href="getting-started.html">Getting Started</a>
+  <a href="faq.html">FAQ &amp; Troubleshooting</a>
+
+  <div class="group">Using the Bridge</div>
+  <a href="widgets-layout.html">Widgets &amp; Layout</a>
+  <a href="computer-core.html">Computer Core</a>
+  <a href="tab-bridge.html">BRIDGE Tab</a>
+  <a href="tab-osint.html">OSINT Tab</a>
+  <a href="tab-home.html">HOME Tab (Home Assistant)</a>
+  <a href="tab-data.html">DATA Tab</a>
+  <a href="tab-archive.html">ARCHIVE Tab</a>
+  <a href="tab-crypto.html">CRYPTO Tab</a>
+
+  <div class="group">Deploy &amp; Operate</div>
+  <a href="deployment.html">Deployment</a>
+  <a href="configuration.html">Configuration Reference</a>
+  <a href="security.html">Security</a>
+  <a href="upgrading.html" class="active">Upgrading</a>
+
+  <div class="group">Development</div>
+  <a href="architecture.html">Architecture</a>
+  <a href="protocol.html">WebSocket Protocol</a>
+  <a href="widget-development.html">Widget Development</a>
+  <a href="backend-modules.html">Backend Modules</a>
+  <a href="screener-engine.html">Screener Engine</a>
+  <a href="contributing.html">Contributing &amp; Testing</a>
+</nav>
+
+<main class="content">
+<h1>Upgrading</h1>
+<p class="lede">Backing up state, pulling a new version, what migrates automatically, and how to roll back.</p>
+
+<p>Homunculus has no in-app updater. Upgrading means pulling the new code and restarting the backend — which is straightforward, because almost all state is JSON under <code>data/</code> and the migration machinery that exists runs automatically at boot.</p>
+
+<h2>Before you upgrade: back up</h2>
+<p>Everything the app remembers lives in two places:</p>
+<ul>
+<li><code>data/</code> — layout, archive spool, OSINT state, every crypto ledger, the audit log. See <a href="configuration.html">the state file table</a> for what each file holds.</li>
+<li>Postgres, if <code>DATABASE_URL</code> is set. This is the <strong>authoritative</strong> copy; the JSON files are a synchronously-written local replica.</li>
+</ul>
+
+<pre><code># Snapshot the data directory
+cp -r data data.bak-$(date +%Y%m%d)
+
+# Snapshot Postgres, if you run it
+docker compose exec db pg_dump -U homunculus homunculus &gt; homunculus-$(date +%Y%m%d).sql</code></pre>
+
+<div class="callout warn"><span class="callout-title">Warning</span> If you run the backend in Docker without a volume mounted at the data directory, <code>data/</code> lives inside the container and a rebuild destroys it. Check your compose volumes before rebuilding.</div>
+
+<h2>Upgrading a source checkout</h2>
+<pre><code>git pull
+npm install          # dependencies may have changed
+npm run typecheck    # optional but fast — catches a broken checkout early
+npm test             # vitest + the Python engine tests</code></pre>
+
+<p>Then rebuild whichever surfaces you use:</p>
+<pre><code>npm run build:web    # the browser UI served by the backend
+npm run build        # the Electron desktop shell
+npm run start        # restart the backend</code></pre>
+
+<div class="callout"><span class="callout-title">Note</span> If the terminal stops working after a Node or Electron version change, rebuild the native PTY binding: <code>npm run rebuild</code>.</div>
+
+<h2>Upgrading a Docker deployment</h2>
+<pre><code>git pull
+docker compose build
+docker compose up -d
+
+# with the bundled Postgres
+docker compose --profile history up -d</code></pre>
+
+<p>Confirm what you are actually running afterwards — the backend serves its build identity:</p>
+<pre><code>curl -s localhost:8787/api/version</code></pre>
+<p>That returns the semver from <code>package.json</code>, the short git commit, and an ISO build timestamp (<code>shared/version.ts</code>). Outside a git checkout the commit degrades to <code>unknown</code> rather than failing.</p>
+
+<h2>What migrates automatically</h2>
+
+<h3>Layout</h3>
+<p><code>LayoutConfig</code> carries a <code>version</code> field (<code>shared/layout.ts</code>, currently <code>LAYOUT_VERSION = 1</code>) that is bumped when the shape changes so <code>server/layout.ts</code> can migrate an older file forward. Layout loading also runs <code>sanitizeLayout()</code>, which drops placements referring to widgets that no longer exist — so a widget removed in a new version degrades to a missing tile rather than a broken tab.</p>
+
+<h3>State store</h3>
+<p><code>server/stateStore.ts</code> runs <code>migrate()</code>, <code>migrateLedgers()</code>, and <code>migrateRuns()</code> at startup. A JSON file with no corresponding Postgres row is imported on first boot — that is the one-time migration of existing state, and it is why no separate migration script exists. <code>reconcile()</code> runs on every boot and reports any drift between the database and the local files.</p>
+
+<h3>Screener jobs</h3>
+<p>Both the Node side and the Python engine stamp <code>schemaVersion</code> (<code>SCREENER_SCHEMA_VERSION</code>, currently <code>1</code>). The engine refuses a job whose version it does not implement rather than guessing at a gate it might read wrong. If you upgrade one side and not the other, screeners fail loudly instead of returning quietly wrong results.</p>
+
+<h2>What does not migrate</h2>
+<ul>
+<li><strong>Most <code>data/*.json</code> files carry no version field.</strong> Layout is the versioned exception. If a release changes the shape of, say, a trade ledger, the file is read as-is — read the CHANGELOG before upgrading across a release that touches crypto state.</li>
+<li><strong>Nothing downgrades.</strong> There is no reverse migration. A newer layout file read by older code is not guaranteed to be understood.</li>
+<li><strong>Secrets do not migrate</strong> and do not need to: the Electron vault is keyed by the OS keychain and the backend holds nothing on disk.</li>
+</ul>
+
+<div class="callout"><span class="callout-title">Note</span> Read <code>CHANGELOG.md</code> before every upgrade. It is the only place a breaking state change would be announced.</div>
+
+<h2>Rolling back</h2>
+<p>Because there is no reverse migration, a rollback is: restore code, then restore state.</p>
+<pre><code># 1. Stop the backend
+# 2. Go back to the previous commit or tag
+git log --oneline -10
+git checkout &lt;previous-tag-or-commit&gt;
+npm install
+
+# 3. Restore the data you snapshotted
+rm -rf data &amp;&amp; cp -r data.bak-YYYYMMDD data
+psql "$DATABASE_URL" &lt; homunculus-YYYYMMDD.sql   # if you use Postgres
+
+# 4. Rebuild and restart
+npm run build:web &amp;&amp; npm run start</code></pre>
+
+<div class="callout danger"><span class="callout-title">Danger</span> Restoring a crypto state snapshot rewinds the app view of your positions, but not the exchange. Open orders and fills that happened after the snapshot are real and will not be in the restored ledgers. Reconcile against the exchange before letting the strategy runner act on restored state.</div>
+
+<h2>Releasing (maintainers)</h2>
+<p>Version bumps go through npm, which stages the changelog automatically:</p>
+<pre><code>npm run release:patch    # npm version patch -m "release: v%s"
+npm run release:minor
+npm run release:major</code></pre>
+<p>The <code>version</code> lifecycle script runs <code>git add CHANGELOG.md</code>, so changelog edits land in the release commit. Desktop artifacts are built with <code>npm run dist</code> (or <code>npm run dist:mac</code>, which enables notarization when <code>NOTARIZE</code> is set).</p>
+
+</main>
+</div>
+
+<footer class="site-footer">Homunculus Core — starship-bridge command interface</footer>
+</body>
+</html>

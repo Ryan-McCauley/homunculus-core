@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en" data-theme="prism">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HOME Tab (Home Assistant) — Homunculus Core Docs</title>
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="holo-rule top"></div>
+<header class="site-header">
+  <a class="wordmark" href="index.html">HOMUNCULUS CORE</a>
+  <span class="sub">Documentation</span>
+</header>
+
+<div class="layout">
+<nav class="sidebar">
+  <div class="group">Start Here</div>
+  <a href="index.html">Overview</a>
+  <a href="getting-started.html">Getting Started</a>
+  <a href="faq.html">FAQ &amp; Troubleshooting</a>
+
+  <div class="group">Using the Bridge</div>
+  <a href="widgets-layout.html">Widgets &amp; Layout</a>
+  <a href="computer-core.html">Computer Core</a>
+  <a href="tab-bridge.html">BRIDGE Tab</a>
+  <a href="tab-osint.html">OSINT Tab</a>
+  <a href="tab-home.html" class="active">HOME Tab (Home Assistant)</a>
+  <a href="tab-data.html">DATA Tab</a>
+  <a href="tab-archive.html">ARCHIVE Tab</a>
+  <a href="tab-crypto.html">CRYPTO Tab</a>
+
+  <div class="group">Deploy &amp; Operate</div>
+  <a href="deployment.html">Deployment</a>
+  <a href="configuration.html">Configuration Reference</a>
+  <a href="security.html">Security</a>
+  <a href="upgrading.html">Upgrading</a>
+
+  <div class="group">Development</div>
+  <a href="architecture.html">Architecture</a>
+  <a href="protocol.html">WebSocket Protocol</a>
+  <a href="widget-development.html">Widget Development</a>
+  <a href="backend-modules.html">Backend Modules</a>
+  <a href="screener-engine.html">Screener Engine</a>
+  <a href="contributing.html">Contributing &amp; Testing</a>
+</nav>
+
+<main class="content">
+<h1>HOME Tab (Home Assistant)</h1>
+<p class="lede">The HOME tab ("Domicile Operations") is a full Home Assistant surface: live entity state, room-by-room sectors, device onboarding, named routines, and server-side monitoring of the connected things in your house.</p>
+
+<h2>Connecting to Home Assistant</h2>
+<p>The backend (<code>server/homeassistant.ts</code>) polls your Home Assistant instance over its REST API and fans updates out to every connected client over the WebSocket. Two settings are required, read from the backend's environment (<code>.env</code> for local dev, container env for Docker):</p>
+
+<table>
+  <tr><th>Variable</th><th>What it is</th></tr>
+  <tr><td><code>HA_URL</code></td><td>Base URL of your Home Assistant instance, e.g. <code>http://ha.local:8123</code> (trailing slash is stripped)</td></tr>
+  <tr><td><code>HA_TOKEN</code></td><td>A long-lived access token minted in the HA UI — <strong>from an admin account</strong> (see the warning below)</td></tr>
+  <tr><td><code>HA_POLL_MS</code></td><td>Optional state-poll interval in milliseconds. Default <code>10000</code> (10&nbsp;s)</td></tr>
+</table>
+
+<p>Every poll fetches <code>/api/states</code> with a request timeout kept just under the poll interval, so a hung request is abandoned before the next tick. The configured temperature unit is read once from <code>/api/config</code> and cached. Failure handling is deliberate: a single failed poll holds the last good snapshot and flags it <code>stale: true</code> (the house has not gone away because one request timed out); only after <strong>3 consecutive failures</strong> does the hub declare Home Assistant offline. When the tab has no data at all it shows <code>HOME ASSISTANT OFFLINE — CHECK HA_URL + HA_TOKEN IN .ENV</code>.</p>
+
+<h3>The setup wizard</h3>
+<p>A setup wizard stands Home Assistant up on a new machine (if needed), verifies the token, and writes both keys into <code>.env</code>:</p>
+
+<pre><code># macOS / Linux
+./scripts/setup-home-assistant.sh
+
+# Windows
+.\scripts\setup-home-assistant.ps1</code></pre>
+
+<p>It asks how HA should be set up and branches accordingly:</p>
+<ul>
+  <li><strong>docker</strong> — runs Home Assistant Container locally. On Linux it uses host networking so mDNS/SSDP device discovery works; Docker Desktop on Windows/macOS cannot, so discovery there is limited to IP/cloud integrations.</li>
+  <li><strong>supervised / vm</strong> — HA OS or Supervised already runs on this machine (or a Pi/VM you flashed); the wizard skips installation and only wires things up.</li>
+  <li><strong>attach</strong> — HA runs elsewhere; just point at its URL.</li>
+</ul>
+
+<p>The script never handles your HA password. It prints the steps to mint a long-lived token in the HA UI, reads the token with echo off, then probes <code>/api/config</code> and <code>/api/states</code> before writing anything. Flags and env vars are accepted for unattended runs:</p>
+
+<pre><code>HA_TOKEN=... ./scripts/setup-home-assistant.sh --mode attach --url http://ha.local:8123 --non-interactive</code></pre>
+
+<p>Restart Homunculus afterwards to pick up the new configuration.</p>
+
+<div class="callout warn"><span class="callout-title">Warning — HA_TOKEN must come from an admin account</span>
+Home Assistant's config-entries API (the surface behind the DEVICES view — listing, adding, and removing integrations, and seeing what HA discovered on the network) is not merely token-gated like <code>/api/states</code>: it additionally requires the token's <strong>user to be an admin</strong>, and answers 401 when it is not. A long-lived token inherits the admin status of the account that created it, so a token minted from a non-admin user will read entity state perfectly and then fail only on device management — a confusing failure that Homunculus surfaces with an explicit message ("config flows require an ADMIN user"). The implication cuts both ways: an admin token can reconfigure the whole house, so keep it on the machine running the backend, gate remote access with <code>HOMUNCULUS_TOKEN</code>, and never commit <code>.env</code>.</div>
+
+<h2>How entities are discovered and grouped</h2>
+
+<h3>Domain filter</h3>
+<p>Not every entity is shipped to the UI. A fixed set of relevant domains (<code>RELEVANT_DOMAINS</code> in <code>server/homeassistant.ts</code>) keeps the snapshot lean and — more importantly — bounds what the tab can ever act on: a domain dropped here does not exist as far as the tab is concerned. The set is:</p>
+<pre><code>climate, sensor, binary_sensor, switch, lock, cover, select, number, button,
+vacuum, media_player, weather, device_tracker, update, person, sun, todo,
+light, scene, script, automation, fan, input_boolean,
+alarm_control_panel, camera, humidifier, water_heater</code></pre>
+
+<p>Each poll produces a snapshot carrying three views of the same data (<code>shared/homeassistant.ts</code>):</p>
+<ul>
+  <li><code>climate</code> — typed climate states for the thermostat panels (current/target temps, humidity, HVAC action).</li>
+  <li><code>entities</code> — a flat, generic list of every relevant entity (id, domain, friendly name, state, unit, device class, attributes, last-changed).</li>
+  <li><code>devices</code> — the same entities grouped into logical devices by id/name pattern match (e.g. <em>Voltaire</em>, <em>R2PEEPOO</em>, <em>Washer</em>, <em>Dryer</em>, <em>Thermostat</em>, <em>Colony</em>, <em>Backup</em> — first match wins; edit <code>DEVICE_DEFS</code> to suit your house).</li>
+</ul>
+
+<h3>Area registry</h3>
+<p>The REST API cannot see rooms: <code>/api/states</code> returns states and attributes, while area membership lives in HA's area/device/entity registries, which are exposed only over HA's websocket API. So <code>server/haAreaRegistry.ts</code> runs exactly one websocket conversation — authenticate, ask for the three registry lists, disconnect — and mirrors HA's own resolution rule: an entity belongs to the area set on the entity itself, otherwise it inherits the area of its device. Registries change roughly never, so the result is cached and refreshed hourly rather than polled. If the fetch fails, areas simply stay unknown (<code>areas: null</code>) and every entity shows up as unassigned — honest, rather than guessing rooms from entity names.</p>
+
+<h3>Sectors</h3>
+<p>A <strong>sector</strong> (<code>shared/haSectors.ts</code>) is one HA area plus a summary of what is happening in it: lights on / lights total, temperature, humidity, summed power draw across the sector's power sensors, and human-readable alert conditions (an open cover reads <code>… OPEN</code>, an unlocked lock <code>… UNLOCKED</code>, a moisture sensor <code>… WET</code>, a smoke sensor <code>… SMOKE</code>). Entities with no known area collect into a single <strong>UNASSIGNED</strong> sector rather than being dropped — nothing in the house becomes unreachable just because it was never filed into a room. Sector ids are URL-safe slugs of the area name (<code>Living Room</code> → <code>living-room</code>), which is also how routes and agents address them.</p>
+
+<h2>What the HOME tab UI shows</h2>
+<p>The tab (<code>src/panels/HomeDashboard.tsx</code>) has five sub-views under one masthead, and the current view lives in the URL rather than component state (<code>shared/homeRoute.ts</code>), so every state is a shareable deep link and an address an agent can navigate to:</p>
+
+<pre><code>#/home/overview
+#/home/sectors/living-room
+#/home/registry?domain=sensor&amp;q=temp
+#/home/overview?uplink=open</code></pre>
+
+<table>
+  <tr><th>View</th><th>What it shows</th></tr>
+  <tr><td><strong>OVERVIEW</strong></td><td>The dashboard: a scene strip, a sector strip, thermostat + ambient + litter-robot tiles, a full-width laundry bay, perimeter/power/media tiles, and the colony row. The masthead tallies subsystems and alerts.</td></tr>
+  <tr><td><strong>SECTORS</strong></td><td>Room-by-room view built from the sector summaries above, with per-sector entity lists and controls.</td></tr>
+  <tr><td><strong>DEVICES</strong></td><td>Integration management in three bands: devices HA discovered on the network by itself, integrations already configured (with reload/remove), and a picker for adding one by name. See "Adding devices" below.</td></tr>
+  <tr><td><strong>REGISTRY</strong></td><td>The escape hatch: every relevant entity, filterable by domain, free text, state, and sector, sortable by last-changed, name, id, or state (<code>shared/haRegistry.ts</code>). A device that never earns a bespoke tile is still one query away here.</td></tr>
+  <tr><td><strong>AUTOMATA</strong></td><td>Scenes, scripts, and automations, with the controls that belong to those domains: activate a scene, run a script, enable/disable/trigger an automation. Automations are the only things in the house that act on their own, so their enabled state is spelled out.</td></tr>
+</table>
+
+<p>Pressing <strong>⌘K / Ctrl+K</strong> anywhere in the tab opens the <strong>uplink palette</strong>: type an instruction, get back a numbered plan of the actual HA service calls it compiled to, and see what ran. Nothing fires from text directly — confirm-tier operations come back HELD with a button. The palette is a window onto the exact interface an autonomous agent uses, so what an agent can do is what the operator can see it doing.</p>
+
+<p>Entity controls in the UI send generic commands over the <code>ha</code> WebSocket channel — any <code>domain.service</code> with arbitrary data — and the server answers with a <code>command_ack</code> message. The channel's <code>subscribe</code> message streams <code>update</code> messages carrying each new snapshot.</p>
+
+<h3>Adding devices (config flows)</h3>
+<p>Adding an integration is a multi-step conversation with HA: HA hands back a form step, you fill it in, the answers go back, and eventually a config entry is created. <code>server/haConfigFlow.ts</code> and <code>shared/haConfigFlow.ts</code> drive this through HTTP routes on the backend (<code>GET /api/ha/integrations</code>, <code>GET /api/ha/entries</code>, <code>GET /api/ha/discovered</code>, <code>POST /api/ha/flow</code>, and <code>GET|POST|DELETE /api/ha/flow/:flowId</code>). HA's form schemas are normalized into renderable fields; entity/device pickers and other exotic selectors are honestly labelled unsupported rather than guessed at.</p>
+
+<p>Because these forms are where API keys and passwords get typed, credential fields are masked in the UI, and everything written to the append-only audit log is redacted — failing <em>closed</em>, so a field the schema does not describe is redacted rather than kept. Each flow start, step, and abort leaves an audit record.</p>
+
+<div class="callout"><span class="callout-title">Note — device management is operator-only, by construction</span>
+None of the config-flow routes are reachable from the agent uplink. The uplink executes HA <em>service</em> calls from its manifest, and a config flow is not a service — it is a different API these routes are the only path to. Adding an integration means typing credentials and granting new software access to the house, which is a decision for the person, not for something compiling intent out of free text.</div>
+
+<h2>Routines</h2>
+<p>A routine (<code>server/routines.ts</code>) is a named sequence of HA service calls executed in order. Routines are defined in code — edit the <code>ROUTINES</code> map — and the Computer Core can describe and execute them on request. They can also be triggered directly over HTTP: <code>POST /api/routine/:name</code> (token-gated), with <code>GET /api/routines</code> listing what is available. The shipped defaults:</p>
+
+<table>
+  <tr><th>Key</th><th>What it does</th></tr>
+  <tr><td><code>goodnight</code></td><td>Thermostat to 68°F, then a litter-box cleaning cycle</td></tr>
+  <tr><td><code>away</code></td><td>Thermostat to energy-saving 78°F</td></tr>
+  <tr><td><code>home</code></td><td>Thermostat to 72°F</td></tr>
+  <tr><td><code>charge_voltaire</code></td><td>Opens the charge-port door, starts charging</td></tr>
+  <tr><td><code>stop_charging</code></td><td>Stops charging</td></tr>
+  <tr><td><code>clean_litter</code></td><td>Immediate litter-box cleaning cycle</td></tr>
+</table>
+
+<div class="callout"><span class="callout-title">Note</span>
+The entity IDs in the shipped routines are best-guess defaults (<code>climate.main_thermostat</code>, <code>vacuum.r2peepoo_litter_box</code>, …). Verify them against your own instance in HA → Developer Tools → States and edit <code>server/routines.ts</code> to match.</div>
+
+<h3>What the Computer Core may command</h3>
+<p>Commands the model itself decides to issue from free-form chat go through <code>executeHaCommand</code>, which enforces a domain allowlist in code: <code>climate, switch, vacuum, cover, fan, light, media_player, number, select, button</code>. Security-relevant domains — locks, alarm panels — and anything else off the list are refused outright, and the check is applied to the <em>service</em> domain (the thing that actually executes) as well as the entity domain, with any model-supplied <code>entity_id</code> override stripped from the payload. Your own HOME tab controls are not restricted by this list — the operator is entitled to control anything in their own house.</p>
+
+<h2>Homewatch (device monitoring)</h2>
+<p><code>server/homewatch.ts</code> watches entity-state <em>transitions</em> on the server and emits toast events for the connected things in the home. Every event goes through <code>broadcastProactive</code>, which fires a toast on every client and writes a durable ARCHIVE record; these events carry <code>chatLog: false</code>, so device chatter never spams the Computer Core conversation. Because it runs server-side, the watching continues even with no UI open. What it watches:</p>
+
+<ul>
+  <li><strong>Washer / dryer</strong> — cycle started (leaves an idle state) and cycle complete (reaches <code>end</code> while running), from <code>sensor.washer_current_status</code> / <code>sensor.dryer_current_status</code>.</li>
+  <li><strong>Litter robot waste drawer</strong> — crossing 80% fires a <em>warn</em> toast ("waste drawer full"); crossing 95% fires a <em>critical</em> one ("will stop cleaning until emptied").</li>
+  <li><strong>Tesla (Voltaire) charging</strong> — charging started (with battery % and limit) and charging complete.</li>
+  <li><strong>Litter robot faults</strong> — a transition into a fault status code (<code>df1</code>, <code>df2</code>, <code>dfs</code>, <code>sdf</code>, <code>br</code>, <code>offline</code>) fires a critical "needs attention" toast.</li>
+</ul>
+
+<p>The first snapshot after startup primes silently — homewatch never alerts on the state the house was already in.</p>
+
+</main>
+</div>
+
+<footer class="site-footer">Homunculus Core — starship-bridge command interface</footer>
+</body>
+</html>

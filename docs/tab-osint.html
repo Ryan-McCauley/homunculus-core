@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en" data-theme="prism">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OSINT Tab — Homunculus Core Docs</title>
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="holo-rule top"></div>
+<header class="site-header">
+  <a class="wordmark" href="index.html">HOMUNCULUS CORE</a>
+  <span class="sub">Documentation</span>
+</header>
+
+<div class="layout">
+<nav class="sidebar">
+  <div class="group">Start Here</div>
+  <a href="index.html">Overview</a>
+  <a href="getting-started.html">Getting Started</a>
+  <a href="faq.html">FAQ &amp; Troubleshooting</a>
+
+  <div class="group">Using the Bridge</div>
+  <a href="widgets-layout.html">Widgets &amp; Layout</a>
+  <a href="computer-core.html">Computer Core</a>
+  <a href="tab-bridge.html">BRIDGE Tab</a>
+  <a href="tab-osint.html" class="active">OSINT Tab</a>
+  <a href="tab-home.html">HOME Tab (Home Assistant)</a>
+  <a href="tab-data.html">DATA Tab</a>
+  <a href="tab-archive.html">ARCHIVE Tab</a>
+  <a href="tab-crypto.html">CRYPTO Tab</a>
+
+  <div class="group">Deploy &amp; Operate</div>
+  <a href="deployment.html">Deployment</a>
+  <a href="configuration.html">Configuration Reference</a>
+  <a href="security.html">Security</a>
+  <a href="upgrading.html">Upgrading</a>
+
+  <div class="group">Development</div>
+  <a href="architecture.html">Architecture</a>
+  <a href="protocol.html">WebSocket Protocol</a>
+  <a href="widget-development.html">Widget Development</a>
+  <a href="backend-modules.html">Backend Modules</a>
+  <a href="screener-engine.html">Screener Engine</a>
+  <a href="contributing.html">Contributing &amp; Testing</a>
+</nav>
+
+<main class="content">
+<h1>OSINT Tab</h1>
+<p class="lede">Open-source situational watchers — seismic, military air traffic, maritime AIS, space weather, cyber threat feeds, service outages, and the Pentagon Pizza Index — fronted by a 3D globe with an armable home-perimeter geofence.</p>
+
+<h2>How it works</h2>
+<p>The OSINT hub (<code>server/osint.ts</code>) is a backend cron: it polls public internet sources on independent timers, normalizes each into a typed snapshot (<code>shared/osint.ts</code>), persists key state to disk so the UI has data instantly on reconnect and across restarts, and fans a combined snapshot out to every connected client over the <code>osint</code> WebSocket channel. Because all the watching happens server-side, escalation alerts fire even when no UI client is connected.</p>
+
+<h2>Data sources</h2>
+
+<table>
+  <tr><th>Watcher</th><th>Source</th><th>Default cadence</th></tr>
+  <tr><td><strong>Pentagon Pizza Index</strong> (PizzINT)</td><td>Busyness readings for pizzerias near the Pentagon, from public "Popular Times"-style data via a PizzINT edge function</td><td>5 min (<code>OSINT_POLL_MS</code>)</td></tr>
+  <tr><td><strong>Seismic Watch</strong></td><td>USGS earthquake GeoJSON feed (M2.5+, past day)</td><td>3 min (<code>OSINT_SEISMIC_MS</code>)</td></tr>
+  <tr><td><strong>Skywatch</strong></td><td>Military ADS-B aircraft from adsb.fi (<code>/api/v2/mil</code>)</td><td>60 s (<code>OSINT_AIRCRAFT_MS</code>)</td></tr>
+  <tr><td><strong>Geomagnetic / Solar</strong></td><td>NOAA SWPC planetary K-index + OVATION aurora forecast</td><td>5 min (<code>OSINT_GEOMAG_MS</code>)</td></tr>
+  <tr><td><strong>Cyber Threat</strong></td><td>CISA Known Exploited Vulnerabilities (KEV) catalog + abuse.ch Feodo Tracker botnet C2 blocklist</td><td>60 min (<code>OSINT_CYBER_MS</code>)</td></tr>
+  <tr><td><strong>Service Outages</strong></td><td>Official Atlassian Statuspage feeds (<code>/api/v2/summary.json</code>) for 12 default services: Discord, GitHub, Cloudflare, OpenAI, Anthropic, DigitalOcean, Reddit, Zoom, Twilio, Datadog, Atlassian, Coinbase</td><td>2 min (<code>OSINT_OUTAGE_MS</code>)</td></tr>
+  <tr><td><strong>IP Watch</strong></td><td>Your public WAN address, from keyless IP-echo endpoints (ipify → ifconfig.co → ipinfo.io, tried in order)</td><td>5 min (<code>OSINT_IPWATCH_MS</code>)</td></tr>
+  <tr><td><strong>Vessel AIS</strong></td><td>aisstream.io position reports over a persistent websocket — dormant until <code>OSINT_AISSTREAM_KEY</code> is set</td><td>Streaming, flushed to clients every 5 s (<code>OSINT_VESSEL_FLUSH_MS</code>)</td></tr>
+</table>
+
+<p>When a poll fails, the affected source is flagged <code>cache</code> (or <code>error</code>) with the error message, and the rest keep serving — the masthead's source pills (QUAKE, AIR, …) show each feed's origin as green (live), amber (cache), or crimson (error). A source with no key shows as OFFLINE with instructions (the vessel card tells you to get a free key at aisstream.io and set <code>OSINT_AISSTREAM_KEY</code> in <code>.env</code>).</p>
+
+<h2>The 3D globe</h2>
+<p>The tab is fronted by a globe.gl/three.js globe (<code>src/panels/OsintGlobe.tsx</code>) styled to the bridge's phosphor aesthetic, code-split so the heavy three.js bundle only loads on this tab. Each dataset is a toggleable overlay layer, with a toggle bar showing live counts:</p>
+
+<ul>
+  <li><strong>SEISMIC</strong> — USGS quakes as pulsing rings plus clickable core points</li>
+  <li><strong>SKYWATCH</strong> — military aircraft as points; emergency squawks render in crimson</li>
+  <li><strong>VESSELS</strong> — AIS ships as blue points</li>
+  <li><strong>CYBER</strong> — botnet C2 servers as crimson points, placed at their country's centroid (<code>server/country-centroids.ts</code>) since the feed carries country codes, not coordinates</li>
+  <li><strong>AURORA</strong> — the NOAA OVATION aurora oval as a heatmap (cells below 25% probability are dropped, capped at 700 cells)</li>
+</ul>
+
+<p>Interactivity: click any point to fly to it and open a HUD, an <strong>auto-track</strong> mode follows priority events, a home marker shows your pinned location, and a live view-center readout tracks where you are looking. Payloads are bounded — at most 300 aircraft and 800 vessels are shipped per tick.</p>
+
+<h2>Side cards</h2>
+<p>Alongside the globe (<code>src/panels/OsintDashboard.tsx</code>), collapsible cards summarize each feed: a Kp-index gauge with G-scale badge and sparkline; the seven strongest recent quakes (with tsunami flags); airborne military aircraft sorted emergency-first; the Pentagon Pizza Index gauge with DEFCON posture, anomaly count, and per-venue busyness bars; the KEV catalog total with recently exploited CVEs (ransomware-linked ones flagged) and active C2 servers; service outage status per tracked service; your public IP with click-to-copy and how long it has been stable; and the geofence card described below.</p>
+
+<h2>Geofence (home perimeter watch)</h2>
+<p>A radius around a pinned home location. To set it up: click <strong>SET HOME</strong> in the masthead, then click the globe to pin home (stored in the browser's localStorage). Choose a radius from the stepped presets — 25, 50, 100, 150, 250, 500, or 1000 km (default 150) — and arm the perimeter.</p>
+
+<p>The armed config is pushed to the server (a <code>geofence</code> message on the <code>osint</code> channel) where it is persisted and <strong>enforced hub-side</strong>: on every poll, the hub checks each geo-bearing feed — quakes, aircraft, vessels — against the perimeter with a great-circle distance test, so the fence stays armed even with no UI client connected. Fresh crossings are recorded as breaches (the card lists the most recent, with kind icon, label, distance, and age; the server retains up to 40) and fire a proactive alert. Details that keep it sane:</p>
+
+<ul>
+  <li><strong>Priming</strong> — the first check per feed kind after arming (or after a server restart that reloads an armed fence from disk) seeds the inside-set silently, so arming never alerts on what was already inside the perimeter.</li>
+  <li><strong>Re-arming</strong> — an event that leaves the perimeter and re-enters counts as a fresh breach.</li>
+  <li><strong>Cooldown</strong> — repeat breach alerts are suppressed for 5 minutes; the breach list still records everything.</li>
+</ul>
+
+<h2>Alert levels and escalation rules</h2>
+<p>Each watcher carries its own severity scale, defined in <code>shared/osint.ts</code>:</p>
+
+<table>
+  <tr><th>Scale</th><th>Levels</th><th>Derivation</th></tr>
+  <tr><td>Pizza DEFCON</td><td>5 ALL QUIET · 4 ELEVATED · 3 ACTIVE · 2 HIGH ALERT · 1 SURGE</td><td>From anomaly count and average deviation over baseline (e.g. 6+ anomalies or 80%+ average deviation → DEFCON 1)</td></tr>
+  <tr><td>Geomagnetic G-scale</td><td>QUIET · G1 MINOR · G2 MODERATE · G3 STRONG · G4 SEVERE · G5 EXTREME</td><td>Mapped from the planetary Kp index (Kp 5 → G1 … Kp 9 → G5)</td></tr>
+  <tr><td>Outage level</td><td>none · minor · major · critical</td><td>Statuspage's own indicator ("maintenance" is treated as minor)</td></tr>
+</table>
+
+<p>Escalations fire proactive alerts — voice-style "Captain — …" messages broadcast to every client as toasts and archived, each with a <code>warn</code> or <code>critical</code> severity:</p>
+
+<ul>
+  <li><strong>PizzINT anomaly</strong> — anomaly count rises or DEFCON drops (30-minute cooldown); critical at DEFCON 2 or below.</li>
+  <li><strong>Seismic event</strong> — any quake of magnitude 6.0+, once per quake id, noting a raised tsunami flag. Critical.</li>
+  <li><strong>Emergency squawk</strong> — an aircraft squawking 7500/7600/7700 or flagged emergency, once per airframe while airborne. Critical.</li>
+  <li><strong>Geomagnetic storm</strong> — the G-scale crossing from quiet into storm (G1+). Warn.</li>
+  <li><strong>Exploited CVE</strong> — a new ransomware-linked vulnerability added to the CISA KEV catalog (never on first load). Warn.</li>
+  <li><strong>Service outage</strong> — a tracked service freshly escalating into major or critical (never on the first prime). Critical when critical, otherwise warn.</li>
+  <li><strong>Public IP changed</strong> — the WAN address changed (confirmed on two consecutive polls to guard against a flaky echo source), with a reminder to update locked-down API allowlists. Warn.</li>
+  <li><strong>Perimeter breach</strong> — a fresh geofence crossing, leading with the nearest event. Critical.</li>
+</ul>
+
+<h2>Configuration</h2>
+<p>Everything is optional — the tab works out of the box with the default keyless sources. Environment variables, read by the backend:</p>
+
+<table>
+  <tr><th>Variable</th><th>Purpose</th></tr>
+  <tr><td><code>OSINT_AISSTREAM_KEY</code></td><td>Free aisstream.io API key; enables the vessel feed</td></tr>
+  <tr><td><code>OSINT_AIS_BBOX</code></td><td>JSON bounding boxes limiting the AIS subscription (default: the whole globe)</td></tr>
+  <tr><td><code>OSINT_OUTAGE_SERVICES</code></td><td>Override the watched status pages: <code>"slug|Name|host,…"</code></td></tr>
+  <tr><td><code>OSINT_PIZZA_URL</code> / <code>OSINT_PIZZA_KEY</code></td><td>Override the PizzINT endpoint/key if it rotates</td></tr>
+  <tr><td><code>OSINT_SEISMIC_URL</code>, <code>OSINT_AIRCRAFT_URL</code>, <code>OSINT_KEV_URL</code>, <code>OSINT_FEODO_URL</code>, <code>OSINT_AIS_URL</code></td><td>Override individual source URLs</td></tr>
+  <tr><td><code>OSINT_POLL_MS</code>, <code>OSINT_SEISMIC_MS</code>, <code>OSINT_AIRCRAFT_MS</code>, <code>OSINT_GEOMAG_MS</code>, <code>OSINT_CYBER_MS</code>, <code>OSINT_OUTAGE_MS</code>, <code>OSINT_IPWATCH_MS</code>, <code>OSINT_VESSEL_FLUSH_MS</code></td><td>Per-watcher poll/flush cadences (ms)</td></tr>
+  <tr><td><code>HOMUNCULUS_DATA_DIR</code></td><td>Where <code>osint-store.json</code> lives (default <code>./data</code>)</td></tr>
+</table>
+
+<p>In the UI, the user configures: which globe layers are visible, auto-track on/off, the home pin, and the geofence radius and armed state (home and geofence settings persist in localStorage and the geofence is mirrored server-side). A <strong>REFRESH</strong> button in the masthead forces an immediate re-poll of every polled source.</p>
+
+<div class="callout"><span class="callout-title">Note — persistence</span>
+The hub persists the pizza snapshot and its trend history (288 points), the Kp history (96 points), the geofence config, and the last known public IP to <code>data/osint-store.json</code>, so the tab has data the moment it reconnects and the perimeter survives restarts. Restored data is honestly labelled <code>cache</code> until the first fresh poll lands.</div>
+
+</main>
+</div>
+
+<footer class="site-footer">Homunculus Core — starship-bridge command interface</footer>
+</body>
+</html>

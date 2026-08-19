@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en" data-theme="prism">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deployment — Homunculus Core Docs</title>
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="holo-rule top"></div>
+<header class="site-header">
+  <a class="wordmark" href="index.html">HOMUNCULUS CORE</a>
+  <span class="sub">Documentation</span>
+</header>
+
+<div class="layout">
+<nav class="sidebar">
+  <div class="group">Start Here</div>
+  <a href="index.html">Overview</a>
+  <a href="getting-started.html">Getting Started</a>
+  <a href="faq.html">FAQ &amp; Troubleshooting</a>
+
+  <div class="group">Using the Bridge</div>
+  <a href="widgets-layout.html">Widgets &amp; Layout</a>
+  <a href="computer-core.html">Computer Core</a>
+  <a href="tab-bridge.html">BRIDGE Tab</a>
+  <a href="tab-osint.html">OSINT Tab</a>
+  <a href="tab-home.html">HOME Tab (Home Assistant)</a>
+  <a href="tab-data.html">DATA Tab</a>
+  <a href="tab-archive.html">ARCHIVE Tab</a>
+  <a href="tab-crypto.html">CRYPTO Tab</a>
+
+  <div class="group">Deploy &amp; Operate</div>
+  <a href="deployment.html" class="active">Deployment</a>
+  <a href="configuration.html">Configuration Reference</a>
+  <a href="security.html">Security</a>
+  <a href="upgrading.html">Upgrading</a>
+
+  <div class="group">Development</div>
+  <a href="architecture.html">Architecture</a>
+  <a href="protocol.html">WebSocket Protocol</a>
+  <a href="widget-development.html">Widget Development</a>
+  <a href="backend-modules.html">Backend Modules</a>
+  <a href="screener-engine.html">Screener Engine</a>
+  <a href="contributing.html">Contributing &amp; Testing</a>
+</nav>
+
+<main class="content">
+<h1>Deployment</h1>
+<p class="lede">Every way to run the Homunculus backend — desktop dev, browser dev, bare production, Docker, and remote access over Tailscale — in one place.</p>
+
+<h2>The shape of every deployment</h2>
+<p>There is exactly one thing to deploy: the Node backend in <code>server/</code>. It serves the built React UI over HTTP and multiplexes everything else — telemetry, the Computer Core chat, the terminal, Home Assistant, OSINT, crypto — over <strong>one WebSocket per client</strong>. The Electron desktop shell, a phone browser, a laptop browser, and a watch-adjacent shortcut are all just clients of that same WebSocket; none of them contains any backend logic. Choosing a deployment mode is choosing where that one Node process runs and who can reach it.</p>
+
+<div class="callout"><span class="callout-title">Requirements</span> Node 20 LTS (<code>.nvmrc</code> pins <code>20</code>; run <code>nvm use</code>). No native-build toolchain is needed on a normal install — <code>node-pty</code> ships prebuilt binaries. The Computer Core additionally needs <code>CLAUDE_CODE_OAUTH_TOKEN</code> in <code>.env</code> (generate with <code>claude setup-token</code>).</div>
+
+<h2>Mode A — Desktop development</h2>
+<pre><code>npm install
+npm run dev</code></pre>
+<p><code>npm run dev</code> runs two processes concurrently (see <code>package.json</code>): <code>dev:server</code> (<code>tsx watch server/index.ts</code>, the backend on port 8787 with hot reload) and <code>dev:app</code> (<code>electron-vite dev</code>, the Electron shell). The shell is a thin window that connects to the backend as a client — it starts nothing itself.</p>
+
+<h2>Mode B — Browser development</h2>
+<p>With <code>npm run dev</code> running, open <code>http://localhost:5173</code> — the Vite dev server with hot module reload. The backend explicitly allows the dev renderer origins <code>http://localhost:5173</code> and <code>http://127.0.0.1:5173</code> through its Origin gate (see <code>DEV_ORIGINS</code> in <code>server/index.ts</code>), so cross-origin fetches and the WebSocket handshake from the dev UI work without extra configuration.</p>
+
+<h2>Mode C — Production (bare Node)</h2>
+<pre><code>npm run build:web    # vite build --config vite.web.config.ts  →  out/renderer
+npm run start        # tsx server/index.ts</code></pre>
+<p>Then open <code>http://localhost:8787</code>. The server reads <code>.env</code> from the working directory at startup (<code>import 'dotenv/config'</code> is the first line of <code>server/index.ts</code>) and serves the built UI from <code>out/renderer</code> by default (override with <code>HOMUNCULUS_WEB_DIR</code>). Port and bind address come from <code>HOMUNCULUS_PORT</code> (default 8787) and <code>HOMUNCULUS_HOST</code> (default <code>0.0.0.0</code>).</p>
+<div class="callout warn"><span class="callout-title">Warning</span> The default bind is <code>0.0.0.0</code> — on a bare-Node install the port is reachable from your LAN unless a firewall says otherwise. Set <code>HOMUNCULUS_TOKEN</code> before the machine is reachable beyond localhost; without it the server refuses remote requests outright (503), which is safe but means a broken phone view. See <a href="security.html">Security</a>.</div>
+
+<h2>Mode D — Docker / docker-compose</h2>
+<pre><code>cp .env.example .env    # fill in CLAUDE_CODE_OAUTH_TOKEN and HOMUNCULUS_TOKEN
+docker compose up --build</code></pre>
+<p>Compose reads <code>.env</code> via <code>env_file</code>, so the file must exist first — without it <code>docker compose</code> aborts with "env file not found".</p>
+
+<h3>What the Dockerfile builds</h3>
+<ul>
+  <li><strong>Two stages, both on <code>node:20-bookworm-slim</code>.</strong> The builder installs the toolchain (<code>python3 make g++</code>) for node-pty's native fallback, runs <code>npm ci</code>, builds the web UI (<code>npm run build:web</code>), then <code>npm prune --omit=dev</code>. The runtime stage copies only <code>node_modules</code>, <code>out/</code>, <code>server/</code>, <code>shared/</code>, <code>engine/</code>, <code>package.json</code>, and <code>tsconfig.json</code>.</li>
+  <li><strong>Runs unprivileged.</strong> <code>USER node</code> — the terminal channel hands out a shell inside this container, and that shell (or any RCE) should not land as root.</li>
+  <li><strong>Baked-in env:</strong> <code>HOMUNCULUS_HOST=0.0.0.0</code>, <code>HOMUNCULUS_PORT=8787</code>, <code>HOMUNCULUS_WEB_DIR=/app/out/renderer</code>, <code>NODE_ENV=production</code>. <code>EXPOSE 8787</code>.</li>
+  <li><strong>Healthcheck</strong> every 30s against <code>/healthz</code> using Node's own <code>fetch</code> — it catches a wedged (not just crashed) process, which matters because the take-profit monitor lives in this process.</li>
+  <li><strong>Entrypoint:</strong> <code>npx tsx server/index.ts</code>.</li>
+</ul>
+
+<h3>What docker-compose adds</h3>
+<ul>
+  <li><strong>Port:</strong> <code>127.0.0.1:8787:8787</code> — loopback-only by default. A bare <code>8787:8787</code> would publish the terminal, finance and trading API to every device on the LAN.</li>
+  <li><strong>Volumes:</strong> <code>homunculus-data:/app/data</code> and <code>homunculus-private:/app/private</code> persist all on-disk state (crypto trades/plans, OSINT cache, archive spool) across rebuilds. Without them every <code>docker compose up --build</code> wipes your data.</li>
+  <li><strong>Env:</strong> everything in <code>.env</code> passes through via <code>env_file</code>; the compose file additionally documents <code>CLAUDE_CODE_OAUTH_TOKEN</code> (required), <code>HOMUNCULUS_TOKEN</code> (strongly recommended once reachable beyond localhost), and <code>HOMUNCULUS_MODEL</code> (optional).</li>
+  <li><strong>Optional Postgres:</strong> a <code>postgres:16-alpine</code> service (<code>db</code>, volume <code>homunculus-pg</code>) behind the <code>history</code> profile: <code>docker compose --profile history up -d</code>. Compose refuses to start it until <code>POSTGRES_PASSWORD</code> is set in <code>.env</code> — there is deliberately no default. Point <code>DATABASE_URL</code> at <code>postgres://homunculus:&lt;password&gt;@db:5432/homunculus</code>.</li>
+  <li><strong>Restart policy:</strong> <code>restart: unless-stopped</code> — but note this only revives the container when the Docker daemon itself is running.</li>
+</ul>
+
+<div class="callout"><span class="callout-title">Note</span> Inside Docker, the System Vitals panel and the embedded terminal reflect the <strong>container</strong> (a small Linux environment), not the host. Everything else — Computer Core, Crypto, OSINT, Home Assistant — works fully. If host-level telemetry matters to you, run bare Node (Mode C) instead.</div>
+
+<h2>Mode E — Windows + Docker Desktop + Tailscale (remote access)</h2>
+<p>This is the <code>WINDOWS.md</code> recipe: run the backend in Docker Desktop (WSL2) on a Windows PC and reach it privately from your phone, watch, or any browser over Tailscale. Condensed:</p>
+<ol>
+  <li><strong>Install:</strong> Docker Desktop (WSL2 backend), Git for Windows, Tailscale (signed into the same account as your phone), and — once, to mint a token — the <code>claude</code> CLI.</li>
+  <li><strong>Get the code and configure:</strong> <code>git clone</code>, <code>Copy-Item .env.example .env</code>, then fill in <code>CLAUDE_CODE_OAUTH_TOKEN</code> (<code>claude setup-token</code>) and <code>HOMUNCULUS_TOKEN</code> (<code>.\scripts\homunculus.ps1 token</code> generates a strong one).</li>
+  <li><strong>Start:</strong> <code>.\scripts\homunculus.ps1 up</code> — builds the image, starts the container in the background, prints your local and Tailscale URLs. Verify at <code>http://localhost:8787</code> and <code>http://localhost:8787/healthz</code>.</li>
+  <li><strong>Reach it remotely:</strong> <code>.\scripts\homunculus.ps1 url</code> prints something like <code>http://your-pc.tailnet-name.ts.net:8787?token=...</code>. Open that on the phone (Tailscale app signed in). The <code>?token=</code> is required off the home PC — bookmark the full URL.</li>
+  <li><strong>Keep it running 24/7:</strong> <code>.\scripts\homunculus.ps1 uptime</code> configures never-sleep/never-hibernate, lid-close-does-nothing, and Docker Desktop auto-start on login. If you run take-profit orders this is not optional: the stop-loss is a real resting order on the exchange, but the take-profit is enforced by the backend's monitor loop — if the PC sleeps or Docker stops, take-profits stop being watched.</li>
+</ol>
+<p>Helper commands: <code>logs</code>, <code>status</code>, <code>down</code>, <code>rebuild</code> (after <code>git pull</code>), <code>url</code>, and <code>up -History</code> to include the Postgres service.</p>
+
+<div class="callout warn"><span class="callout-title">Warning</span> Under Docker Desktop on Windows the "host" is a WSL2 VM, so vitals and the terminal show the container's Linux environment, not Windows. This is expected. Also: Tailscale keeps you off the public internet, but it does not protect your LAN — if you change the compose port mapping from <code>127.0.0.1:8787:8787</code> to a bare <code>8787:8787</code>, anything on your home Wi-Fi can reach the port. Set <code>HOMUNCULUS_TOKEN</code> before you do that.</div>
+
+<h2>Phone, watch, browser — all the same client</h2>
+<p>There is no separate mobile deployment. The phone browser loads the same web UI from the same backend and speaks the same WebSocket; it just passes <code>?token=&lt;HOMUNCULUS_TOKEN&gt;</code> in the URL because it is not localhost. The Apple Watch has no general browser — realistic options are a phone-side shortcut/complication that opens the URL. The packaged Electron desktop app is also just a client: it looks for <code>http://localhost:8787</code> (override with <code>HOMUNCULUS_URL</code>), shows a waiting screen if no backend is up, and connects by itself when one appears.</p>
+
+</main>
+</div>
+
+<footer class="site-footer">Homunculus Core — starship-bridge command interface</footer>
+</body>
+</html>

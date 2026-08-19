@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en" data-theme="prism">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Widgets &amp; Layout — Homunculus Core Docs</title>
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="holo-rule top"></div>
+<header class="site-header">
+  <a class="wordmark" href="index.html">HOMUNCULUS CORE</a>
+  <span class="sub">Documentation</span>
+</header>
+
+<div class="layout">
+<nav class="sidebar">
+  <div class="group">Start Here</div>
+  <a href="index.html">Overview</a>
+  <a href="getting-started.html">Getting Started</a>
+  <a href="faq.html">FAQ &amp; Troubleshooting</a>
+
+  <div class="group">Using the Bridge</div>
+  <a href="widgets-layout.html" class="active">Widgets &amp; Layout</a>
+  <a href="computer-core.html">Computer Core</a>
+  <a href="tab-bridge.html">BRIDGE Tab</a>
+  <a href="tab-osint.html">OSINT Tab</a>
+  <a href="tab-home.html">HOME Tab (Home Assistant)</a>
+  <a href="tab-data.html">DATA Tab</a>
+  <a href="tab-archive.html">ARCHIVE Tab</a>
+  <a href="tab-crypto.html">CRYPTO Tab</a>
+
+  <div class="group">Deploy &amp; Operate</div>
+  <a href="deployment.html">Deployment</a>
+  <a href="configuration.html">Configuration Reference</a>
+  <a href="security.html">Security</a>
+  <a href="upgrading.html">Upgrading</a>
+
+  <div class="group">Development</div>
+  <a href="architecture.html">Architecture</a>
+  <a href="protocol.html">WebSocket Protocol</a>
+  <a href="widget-development.html">Widget Development</a>
+  <a href="backend-modules.html">Backend Modules</a>
+  <a href="screener-engine.html">Screener Engine</a>
+  <a href="contributing.html">Contributing &amp; Testing</a>
+</nav>
+
+<main class="content">
+<h1>Widgets &amp; Layout</h1>
+<p class="lede">Every tab is a 12-column grid of widgets — rearrange, resize, move them between tabs, and the arrangement persists on the server so every client agrees.</p>
+
+<h2>Tabs are grids of widgets</h2>
+<p>The tab bar and the contents of every tab are <strong>data, not code</strong>. <code>src/App.tsx</code> renders whatever the layout config says: which tabs exist, in what order, which are enabled, which one opens on launch, and which widgets sit where inside each one. A "widget" is any panel from <code>src/panels/*</code> registered in <code>src/widgets/registry.tsx</code>.</p>
+<p>Placement is on a <strong>12-column grid</strong> (<code>GRID_COLS</code> in <code>shared/layout.ts</code>); vertical position and height are in row units. Each placement records an <code>instance</code> id, the registry <code>widget</code> key, and its <code>x</code>/<code>y</code>/<code>w</code>/<code>h</code>. The big whole-tab dashboards (OSINT, HOME, DATA, ARCHIVE, CRYPTO) are widgets too — they just default to a full-width, full-height placement, so a stock install looks like fixed pages.</p>
+
+<h2>Rearranging</h2>
+<h3>Edit mode (drag placement)</h3>
+<ul>
+  <li>Click <strong>⠿ EDIT LAYOUT</strong> in the header. Drag a widget's header to move it, drag the corner to resize.</li>
+  <li><strong>Move a widget to another tab by dragging:</strong> while dragging, drop it onto a tab chip in the tab bar — the target chip highlights, and the widget relocates to that tab.</li>
+  <li>Click <strong>✓ DONE</strong> to leave edit mode.</li>
+</ul>
+
+<h3>SETTINGS → WIDGETS (add, remove, shift)</h3>
+<p>Open <strong>⚙ Settings</strong>. The settings dialog has four sections: <strong>TABS</strong>, <strong>WIDGETS</strong>, <strong>KEYS</strong>, and <strong>SYNC</strong>.</p>
+<ul>
+  <li><strong>WIDGETS</strong> lists what is placed on each tab and a picker of every available widget, grouped by category. From here you can add a widget to the selected tab, remove one, or move one to a different tab via a dropdown. Singleton widgets already placed somewhere show as "Already placed — this panel can only exist once".</li>
+  <li><strong>TABS</strong> controls tab order (▲▼), enable/disable, the ★ launch tab, and adding/removing custom tabs. The six shipped tabs are <code>builtin</code>: they can be disabled and reordered but not deleted, and the UI never lets you disable the last enabled tab.</li>
+</ul>
+
+<h2>Server-side persistence</h2>
+<p>The layout lives on the <strong>server</strong>, not in localStorage — so the Electron shell, the local browser, and a phone over Tailscale all show the same dashboard.</p>
+<ul>
+  <li><code>shared/layout.ts</code> — the model (<code>LayoutConfig</code>, <code>TabConfig</code>, <code>WidgetPlacement</code>), the stock <code>defaultLayout()</code>, and <code>sanitizeLayout()</code>, which normalises anything read off disk or POSTed by a client: unknown fields are dropped, bad numbers clamped, and a layout with zero tabs falls back to the stock one rather than blanking the app.</li>
+  <li><code>server/layout.ts</code> — the file-backed store. It reads once at startup and writes through on every mutation to <code>data/layout.json</code> (the directory is overridable with <code>HOMUNCULUS_DATA_DIR</code>). A corrupt <code>layout.json</code> does not brick the UI — the server logs a warning and falls back to defaults. <code>resetLayout()</code> drops back to the shipped arrangement, and the first-run-wizard flag is stored alongside in <code>data/setup.json</code>.</li>
+</ul>
+<div class="callout"><span class="callout-title">Note</span> Because a malformed client POST is sanitised into a valid layout, the worst a bad edit can do is degrade to the stock arrangement — never persist garbage.</div>
+
+<h2>Widget catalog</h2>
+<p>The full registry, from <code>src/widgets/registry.tsx</code>. Adding an entry there is the only step needed to make a new panel placeable — it then shows up in SETTINGS → WIDGETS. <strong>Singleton</strong> widgets can exist only once across all tabs (a second Terminal instance would fight the first over its PTY session id).</p>
+
+<table>
+  <tr><th>Widget id</th><th>Label</th><th>Category</th><th>Notes</th></tr>
+  <tr><td><code>system.vitals</code></td><td>System Vitals</td><td>CORE</td><td>Live telemetry snapshot</td></tr>
+  <tr><td><code>core.terminal</code></td><td>Terminal</td><td>CORE</td><td>Singleton — real PTY</td></tr>
+  <tr><td><code>core.computer</code></td><td>Computer Core</td><td>CORE</td><td>Singleton — Claude chat</td></tr>
+  <tr><td><code>home.assistant</code></td><td>Home Assistant</td><td>HOME</td><td>Compact HA tile</td></tr>
+  <tr><td><code>home.laundry</code></td><td>Laundry</td><td>HOME</td><td>Reads HA entities</td></tr>
+  <tr><td><code>home.litter</code></td><td>Litter Robot</td><td>HOME</td><td>Reads HA entities</td></tr>
+  <tr><td><code>home.colony</code></td><td>Colony</td><td>HOME</td><td>Reads HA entities</td></tr>
+  <tr><td><code>home.ambient</code></td><td>Ambient</td><td>HOME</td><td>Reads HA entities</td></tr>
+  <tr><td><code>crypto.opentrades</code></td><td>Open Trades</td><td>CRYPTO</td><td>Open crypto positions</td></tr>
+  <tr><td><code>dash.home</code></td><td>HOME dashboard</td><td>DASHBOARD</td><td>Singleton, whole-tab</td></tr>
+  <tr><td><code>dash.osint</code></td><td>OSINT dashboard</td><td>DASHBOARD</td><td>Singleton, whole-tab</td></tr>
+  <tr><td><code>dash.data</code></td><td>DATA dashboard</td><td>DASHBOARD</td><td>Singleton, whole-tab</td></tr>
+  <tr><td><code>dash.archive</code></td><td>ARCHIVE dashboard</td><td>DASHBOARD</td><td>Singleton, whole-tab</td></tr>
+  <tr><td><code>dash.crypto</code></td><td>CRYPTO dashboard</td><td>DASHBOARD</td><td>Singleton, whole-tab</td></tr>
+  <tr><td><code>misc.network</code></td><td>Network Status</td><td>MISC</td><td>Placeholder — "uplink module pending"</td></tr>
+  <tr><td><code>misc.traffic</code></td><td>Network Traffic</td><td>MISC</td><td>Placeholder — "graph pending"</td></tr>
+</table>
+
+<h2>The stock arrangement</h2>
+<p><code>defaultLayout()</code> in <code>shared/layout.ts</code> ships BRIDGE as a composed 2 / 7 / 3-column tab — System Vitals rail, Terminal over Computer Core in the middle, and a right rail of Home Assistant, Open Trades, Laundry, and Litter Robot tiles — followed by OSINT, HOME, DATA, ARCHIVE, and CRYPTO as full-bleed dashboard widgets. <strong>BRIDGE</strong> is the default launch tab.</p>
+
+</main>
+</div>
+
+<footer class="site-footer">Homunculus Core — starship-bridge command interface</footer>
+</body>
+</html>

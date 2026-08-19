@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en" data-theme="prism">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Security — Homunculus Core Docs</title>
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="holo-rule top"></div>
+<header class="site-header">
+  <a class="wordmark" href="index.html">HOMUNCULUS CORE</a>
+  <span class="sub">Documentation</span>
+</header>
+
+<div class="layout">
+<nav class="sidebar">
+  <div class="group">Start Here</div>
+  <a href="index.html">Overview</a>
+  <a href="getting-started.html">Getting Started</a>
+  <a href="faq.html">FAQ &amp; Troubleshooting</a>
+
+  <div class="group">Using the Bridge</div>
+  <a href="widgets-layout.html">Widgets &amp; Layout</a>
+  <a href="computer-core.html">Computer Core</a>
+  <a href="tab-bridge.html">BRIDGE Tab</a>
+  <a href="tab-osint.html">OSINT Tab</a>
+  <a href="tab-home.html">HOME Tab (Home Assistant)</a>
+  <a href="tab-data.html">DATA Tab</a>
+  <a href="tab-archive.html">ARCHIVE Tab</a>
+  <a href="tab-crypto.html">CRYPTO Tab</a>
+
+  <div class="group">Deploy &amp; Operate</div>
+  <a href="deployment.html">Deployment</a>
+  <a href="configuration.html">Configuration Reference</a>
+  <a href="security.html" class="active">Security</a>
+  <a href="upgrading.html">Upgrading</a>
+
+  <div class="group">Development</div>
+  <a href="architecture.html">Architecture</a>
+  <a href="protocol.html">WebSocket Protocol</a>
+  <a href="widget-development.html">Widget Development</a>
+  <a href="backend-modules.html">Backend Modules</a>
+  <a href="screener-engine.html">Screener Engine</a>
+  <a href="contributing.html">Contributing &amp; Testing</a>
+</nav>
+
+<main class="content">
+<h1>Security</h1>
+<p class="lede">Threat model, the two token gates, credential isolation for agent processes, and a hardening checklist.</p>
+
+<p>Homunculus is not a read-only dashboard. It runs a real shell, holds exchange credentials that can spend money, holds a Home Assistant admin token that can unlock a house, and runs Claude agent sessions with <code>permissionMode: 'bypassPermissions'</code>. Treat the backend as a privileged process and read this page before exposing it to anything wider than <code>localhost</code>.</p>
+
+<div class="callout danger"><span class="callout-title">Danger</span> Anyone who can reach the backend and pass its token gets a shell on the machine, the ability to stage trades, and control of every Home Assistant entity. There is no per-user model, no roles, and no per-action confirmation at the transport layer. The token <em>is</em> the security boundary.</div>
+
+<h2>The two gates</h2>
+<p>The backend enforces two separate secrets, with deliberately different rules (<code>server/index.ts</code>).</p>
+
+<h3>HOMUNCULUS_TOKEN — the remote-access gate</h3>
+<p>Gates both the WebSocket upgrade and the sensitive REST routes. The logic in <code>requireToken()</code>:</p>
+<ul>
+<li><strong>Localhost bypasses it.</strong> Requests that <code>isLocalReq()</code> judges local are admitted without a token, so the desktop app and the operator's own machine work unconfigured.</li>
+<li><strong>An unconfigured gate is a closed gate.</strong> If <code>HOMUNCULUS_TOKEN</code> is empty, remote callers get <code>503</code> with "HOMUNCULUS_TOKEN is not configured — remote access is refused until it is set". This is a hardening fix: the earlier behaviour returned <em>true</em> when the token was empty, which meant "no token configured" silently equalled "no authentication at all" for every remote caller — on a LAN or a tailnet that served finance data, trade staging and the agent fleet to anyone who could reach the port.</li>
+<li><strong>Two ways to present it:</strong> a <code>?token=…</code> query parameter or an <code>x-homunculus-token</code> header.</li>
+<li><strong>Compared in constant time</strong> via <code>constantTimeEquals()</code>. A wrong token gets <code>401</code>.</li>
+</ul>
+
+<h3>HOMUNCULUS_ADMIN_TOKEN — the audit-management gate</h3>
+<p>Guards audit-log management (<code>POST /api/audit/annotate</code>) with three deliberate differences from the gate above:</p>
+<ul>
+<li><strong>No localhost bypass.</strong> Agents and skills run on this machine too, so "local" is not a trust boundary for the record that exists to catch them.</li>
+<li><strong>Header only.</strong> A query-string secret leaks into shell history and proxy logs.</li>
+<li><strong>Unset means <code>503</code>, not open.</strong> Audit <em>recording</em> never depends on this token; only management of the record does.</li>
+</ul>
+
+<div class="callout warn"><span class="callout-title">Warning</span> Keep <code>HOMUNCULUS_ADMIN_TOKEN</code> somewhere the agents cannot read. Its entire purpose is to stop a compromised or confused agent from editing the log that would reveal what it did.</div>
+
+<h2>Credential isolation for agent processes</h2>
+<p>Every Claude Agent SDK session the server starts — fleet agents, the strategy runner, the Computer Core chat, the proactive monitor — runs with <code>permissionMode: 'bypassPermissions'</code>. Fleet agents additionally get unrestricted Bash and a prompt assembled partly from text <em>other</em> agents wrote (library documents, board threads, journals, manager-file instructions) plus live market and home-state strings. That is a prompt-injection surface pointed at a shell.</p>
+
+<p><code>server/agentEnv.ts</code> answers this with an <strong>allowlist</strong>, not a denylist. Nothing reaches a child process unless it is named explicitly:</p>
+<ul>
+<li><strong>System keys</strong> — <code>PATH</code>, <code>HOME</code>, <code>SHELL</code>, temp dirs, and the Windows equivalents (<code>SystemRoot</code>, <code>PATHEXT</code>, <code>COMSPEC</code>…) a child needs to spawn anything at all.</li>
+<li><strong>App keys</strong> — only <code>HOMUNCULUS_MODEL</code> and <code>HOMUNCULUS_PORT</code>. Neither is a credential.</li>
+<li><strong><code>CLAUDE_CODE_OAUTH_TOKEN</code></strong> — the subscription token the session needs to run.</li>
+</ul>
+
+<p>Everything else is stripped. A second list, <code>NEVER_FORWARDED</code>, names the credentials explicitly even though the allowlist would already block them — so the intent survives a future edit that loosens the allowlist:</p>
+
+<pre><code>GEMINI_API_KEY, GEMINI_API_SECRET   // spend the portfolio directly
+HA_TOKEN, HA_URL                    // unlock the house
+CMC_API_KEY
+DATABASE_URL                        // the system of record
+HOMUNCULUS_TOKEN, HOMUNCULUS_ADMIN_TOKEN
+OSINT_AISSTREAM_KEY, OSINT_PIZZA_KEY
+ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN</code></pre>
+
+<p>The reasoning is worth internalising: the trade-authority gate in <code>agents.ts::propose</code> is meaningless if a child can simply sign its own Gemini request. A denylist silently re-opens the hole the day someone adds a new credential — which is exactly how six credentials ended up being forwarded before this was fixed. With an allowlist, new credentials are safe by default and granting one is a one-line reviewable decision.</p>
+
+<h2>Secret storage</h2>
+<p>The secret store (<code>server/secrets.ts</code>) never persists anything. The backend is a plain Node process with no OS keychain and may be a headless container, so:</p>
+<ul>
+<li>Values live <strong>in memory only</strong>, injected at runtime by the Electron shell, which owns the encrypted-at-rest vault (<code>electron/vault.ts</code> → Electron <code>safeStorage</code> → macOS Keychain, Windows DPAPI, or libsecret).</li>
+<li><strong>Nothing unencrypted touches disk</strong>, and no secret value is ever sent to a client — <code>status()</code> reports presence, source, and a last-4 fingerprint only.</li>
+<li>The <strong>unlock endpoint is localhost-only</strong>. A key must never cross the Tailscale boundary, so the phone or browser view cannot write keys; it sees the KEYS panel read-only.</li>
+<li>A backend restart drops the vault; the Electron shell re-pushes on connect. A headless backend falls back to <code>.env</code>.</li>
+</ul>
+
+<h2>Risk surfaces, ranked</h2>
+
+<h3>1. The embedded terminal</h3>
+<p>The Terminal widget is a real PTY (<code>server/terminal.ts</code>, node-pty) running as the backend user. It is the single largest risk surface: anyone who reaches an authenticated session has shell access, and the shell can read <code>.env</code> — every credential the allowlist works to keep away from agent children.</p>
+<p>The backend takes one extra precaution here: <strong>the terminal channel re-checks the token even on a local socket.</strong> The upgrade handler waives the token for localhost, which is sensible for the dashboard itself but not for a channel that hands out a shell carrying the process environment. So opening a PTY always costs the real secret once one is configured, regardless of where the socket dialled in from.</p>
+<div class="callout danger"><span class="callout-title">Danger</span> In Docker the terminal is the container's shell, which bounds the blast radius. Running the backend natively on your desktop means the terminal is <em>your</em> shell with <em>your</em> permissions.</div>
+
+<h3>2. Trading credentials</h3>
+<p><code>GEMINI_API_KEY</code> / <code>GEMINI_API_SECRET</code> can place orders. Issue exchange keys with the narrowest permissions that make the tab useful to you — read-only keys give market data and portfolio views with no ability to trade at all.</p>
+
+<h3>3. The Home Assistant admin token</h3>
+<p><code>HA_TOKEN</code> must come from an admin account for the DEVICES tab to work, which means the token can do anything an HA admin can: add and remove integrations, control every entity, unlock locks, disarm alarms. Its blast radius is your entire home, not just the widgets you placed.</p>
+
+<h3>4. Prompt injection into agent sessions</h3>
+<p>Agent prompts include text written by other agents and live external data (market strings, home state, OSINT feeds). Content arriving through those channels is data, not instruction — but a model with Bash can be talked into treating it as instruction. The env allowlist is the mitigation that assumes this will sometimes fail.</p>
+
+<h2>Deployment posture</h2>
+<table>
+<tr><th>Posture</th><th>Assessment</th></tr>
+<tr><td>Localhost only</td><td>Safest. No token needed; nothing is reachable off the machine.</td></tr>
+<tr><td>Tailscale (recommended for remote)</td><td>Good. Traffic is encrypted and device-authenticated by the tailnet; <code>HOMUNCULUS_TOKEN</code> is a second factor. This is what <a href="deployment.html">the Windows deployment guide</a> assumes.</td></tr>
+<tr><td>LAN-exposed port</td><td>Risky. Plain HTTP/WS — the token crosses the wire in the clear and any device on the network can attempt access.</td></tr>
+<tr><td>Public internet port-forward</td><td>Do not. There is no TLS, no rate limiting, and no account model in front of a shell.</td></tr>
+</table>
+
+<h2>Hardening checklist</h2>
+<ul>
+<li>Set a long random <code>HOMUNCULUS_TOKEN</code> before the backend is reachable off the machine.</li>
+<li>Set <code>HOMUNCULUS_ADMIN_TOKEN</code> to a different long random string, stored where agents cannot read it.</li>
+<li>Reach remote clients over Tailscale rather than a forwarded port. Never expose the port to the public internet.</li>
+<li>Run the backend in Docker if you want the terminal and any agent shell bounded to a container.</li>
+<li>Issue read-only Gemini keys unless you specifically intend to trade from the bridge.</li>
+<li>Keep <code>.env</code> out of version control (it is gitignored and dockerignored by default — keep it that way).</li>
+<li>Rotate <code>CLAUDE_CODE_OAUTH_TOKEN</code>, exchange keys, and <code>HA_TOKEN</code> if a client device is lost.</li>
+<li>Review <code>data/audit/*.jsonl</code> after any unexpected agent behaviour; it records regardless of whether the admin token is configured.</li>
+<li>Back up <code>data/</code> before upgrades — see <a href="upgrading.html">Upgrading</a>.</li>
+</ul>
+
+</main>
+</div>
+
+<footer class="site-footer">Homunculus Core — starship-bridge command interface</footer>
+</body>
+</html>

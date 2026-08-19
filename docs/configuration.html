@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en" data-theme="prism">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Configuration Reference — Homunculus Core Docs</title>
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="holo-rule top"></div>
+<header class="site-header">
+  <a class="wordmark" href="index.html">HOMUNCULUS CORE</a>
+  <span class="sub">Documentation</span>
+</header>
+
+<div class="layout">
+<nav class="sidebar">
+  <div class="group">Start Here</div>
+  <a href="index.html">Overview</a>
+  <a href="getting-started.html">Getting Started</a>
+  <a href="faq.html">FAQ &amp; Troubleshooting</a>
+
+  <div class="group">Using the Bridge</div>
+  <a href="widgets-layout.html">Widgets &amp; Layout</a>
+  <a href="computer-core.html">Computer Core</a>
+  <a href="tab-bridge.html">BRIDGE Tab</a>
+  <a href="tab-osint.html">OSINT Tab</a>
+  <a href="tab-home.html">HOME Tab (Home Assistant)</a>
+  <a href="tab-data.html">DATA Tab</a>
+  <a href="tab-archive.html">ARCHIVE Tab</a>
+  <a href="tab-crypto.html">CRYPTO Tab</a>
+
+  <div class="group">Deploy &amp; Operate</div>
+  <a href="deployment.html">Deployment</a>
+  <a href="configuration.html" class="active">Configuration Reference</a>
+  <a href="security.html">Security</a>
+  <a href="upgrading.html">Upgrading</a>
+
+  <div class="group">Development</div>
+  <a href="architecture.html">Architecture</a>
+  <a href="protocol.html">WebSocket Protocol</a>
+  <a href="widget-development.html">Widget Development</a>
+  <a href="backend-modules.html">Backend Modules</a>
+  <a href="screener-engine.html">Screener Engine</a>
+  <a href="contributing.html">Contributing &amp; Testing</a>
+</nav>
+
+<main class="content">
+<h1>Configuration Reference</h1>
+<p class="lede">Every environment variable the backend reads, where configuration is loaded from, and where persistent state lives on disk.</p>
+
+<p>Homunculus reads its configuration from a single <code>.env</code> file in the repository root, loaded by the backend at startup via <code>dotenv/config</code> (see <code>server/index.ts</code>). The same file is passed into the container by <code>docker-compose</code> through <code>env_file</code>. Copy <code>.env.example</code> to <code>.env</code> and fill in what you need — every variable below is optional except where noted.</p>
+
+<div class="callout"><span class="callout-title">Note</span> <code>.env</code> is gitignored and dockerignored. Nothing in it is ever sent to a client: the KEYS panel reports only presence and a last-4 fingerprint.</div>
+
+<h2>Computer Core</h2>
+<table>
+<tr><th>Variable</th><th>Default</th><th>Effect</th></tr>
+<tr><td><code>CLAUDE_CODE_OAUTH_TOKEN</code></td><td>—</td><td><strong>Required for the Computer Core.</strong> Drives your Claude Pro/Max subscription rather than per-token API billing. Mint it on a machine with the <code>claude</code> CLI logged in: <code>claude setup-token</code>.</td></tr>
+<tr><td><code>HOMUNCULUS_MODEL</code></td><td>SDK default</td><td>Model override for the Computer Core and every agent session — <code>sonnet</code>, <code>opus</code>, <code>haiku</code>, or a full model id.</td></tr>
+<tr><td><code>ANTHROPIC_API_KEY</code></td><td>—</td><td>Deliberately <em>not</em> used. It appears only in <code>NEVER_FORWARDED</code> (<code>server/agentEnv.ts</code>) to guarantee it is stripped from agent child processes, forcing the local-subscription path.</td></tr>
+</table>
+
+<h2>Network and access control</h2>
+<table>
+<tr><th>Variable</th><th>Default</th><th>Effect</th></tr>
+<tr><td><code>HOMUNCULUS_PORT</code></td><td><code>8787</code></td><td>HTTP + WebSocket listen port.</td></tr>
+<tr><td><code>HOMUNCULUS_HOST</code></td><td><code>0.0.0.0</code></td><td>Bind address. The default is correct for Docker; leave it unset.</td></tr>
+<tr><td><code>HOMUNCULUS_TOKEN</code></td><td>—</td><td><strong>Required once reachable beyond localhost.</strong> Gates the WebSocket upgrade and the sensitive REST routes. Remote clients pass it as <code>?token=…</code> or an <code>x-homunculus-token</code> header. Unset means remote requests are refused with <code>503</code> — an unconfigured gate is a closed gate.</td></tr>
+<tr><td><code>HOMUNCULUS_ADMIN_TOKEN</code></td><td>—</td><td>Admin secret for audit-log management (<code>POST /api/audit/annotate</code>). Header-only, never waived for localhost. Unset keeps those routes closed at <code>503</code>; audit recording continues regardless.</td></tr>
+<tr><td><code>HOMUNCULUS_URL</code></td><td>—</td><td>Backend URL used by helper tooling to reach the API.</td></tr>
+<tr><td><code>HOMUNCULUS_WEB_DIR</code></td><td><code>./out/renderer</code></td><td>Directory of built web assets the backend serves.</td></tr>
+<tr><td><code>HOMUNCULUS_DATA_DIR</code></td><td><code>./data</code></td><td>Root for all persisted state — layout, archive spool, OSINT store, crypto state.</td></tr>
+<tr><td><code>HOMUNCULUS_DEVTOOLS</code></td><td>—</td><td>Opens Electron DevTools on launch.</td></tr>
+</table>
+
+<h2>History, archive, and audit (Postgres)</h2>
+<table>
+<tr><th>Variable</th><th>Default</th><th>Effect</th></tr>
+<tr><td><code>DATABASE_URL</code></td><td>—</td><td>Postgres connection string. Unset means live-only: the DATA and ARCHIVE tabs work but nothing persists to a database. Also backs the append-only <code>audit_log</code> table.</td></tr>
+<tr><td><code>POSTGRES_PASSWORD</code></td><td>—</td><td>Password for the bundled compose Postgres service. Compose refuses to start without it — there is deliberately no fallback default. Must match the password inside <code>DATABASE_URL</code>.</td></tr>
+</table>
+
+<pre><code># Enable durable history with the bundled database
+POSTGRES_PASSWORD=choose-something-long
+DATABASE_URL=postgres://homunculus:choose-something-long@db:5432/homunculus
+
+docker compose --profile history up -d</code></pre>
+
+<div class="callout"><span class="callout-title">Note</span> Even without <code>DATABASE_URL</code>, the audit log still records to <code>data/audit/*.jsonl</code> and the archive still keeps its on-disk ring of 1000 events.</div>
+
+<h2>Crypto</h2>
+<table>
+<tr><th>Variable</th><th>Default</th><th>Effect</th></tr>
+<tr><td><code>GEMINI_API_KEY</code></td><td>—</td><td>Gemini exchange key. Read-only market data works without it; portfolio and trading do not.</td></tr>
+<tr><td><code>GEMINI_API_SECRET</code></td><td>—</td><td>Gemini exchange secret. Paired with the key above.</td></tr>
+<tr><td><code>CMC_API_KEY</code></td><td>—</td><td>CoinMarketCap key used to cross-check the volume gate against aggregated cross-exchange volume. Without it, the volume gate falls back to Gemini-only data.</td></tr>
+</table>
+
+<div class="callout danger"><span class="callout-title">Danger</span> <code>GEMINI_API_KEY</code> and <code>GEMINI_API_SECRET</code> can spend the portfolio directly. They are on the <code>NEVER_FORWARDED</code> list so no agent child process ever inherits them — see <a href="security.html">Security</a>.</div>
+
+<h2>Home Assistant</h2>
+<table>
+<tr><th>Variable</th><th>Default</th><th>Effect</th></tr>
+<tr><td><code>HA_URL</code></td><td>—</td><td>Base URL of your Home Assistant instance.</td></tr>
+<tr><td><code>HA_TOKEN</code></td><td>—</td><td>Long-lived access token (HA → profile → Security).</td></tr>
+<tr><td><code>HA_POLL_MS</code></td><td><code>10000</code></td><td>State poll interval in milliseconds.</td></tr>
+</table>
+
+<div class="callout warn"><span class="callout-title">Warning</span> Create <code>HA_TOKEN</code> from an <strong>admin</strong> account. A token inherits the admin status of whoever made it, and a non-admin token fails confusingly: reading state, controlling lights and running scenes all work, and only the DEVICES tab breaks — Home Assistant gates config flows on admin and answers 401.</div>
+
+<h2>Screener engine</h2>
+<table>
+<tr><th>Variable</th><th>Default</th><th>Effect</th></tr>
+<tr><td><code>SCREENER_PYTHON</code></td><td>auto-probed</td><td>Pins the Python interpreter for the screening engine. Normally leave unset: the server probes at startup (the <code>py</code> launcher first on Windows, <code>python3</code> elsewhere) and skips the Microsoft Store alias stub that only prints "Python was not found". Set it to pin a venv or one of several installs.</td></tr>
+</table>
+
+<h2>OSINT watchers</h2>
+<p>All OSINT variables have working defaults; set them only to tune feeds or supply an optional key. See <code>server/osint.ts</code> for the authoritative list.</p>
+<table>
+<tr><th>Variable</th><th>Default</th><th>Effect</th></tr>
+<tr><td><code>OSINT_AISSTREAM_KEY</code></td><td>—</td><td>aisstream.io API key. Without it the vessel feed stays idle.</td></tr>
+<tr><td><code>OSINT_AIS_URL</code></td><td><code>wss://stream.aisstream.io/v0/stream</code></td><td>AIS stream endpoint.</td></tr>
+<tr><td><code>OSINT_AIS_BBOX</code></td><td>—</td><td>JSON bounding box limiting the AIS subscription.</td></tr>
+<tr><td><code>OSINT_VESSEL_FLUSH_MS</code></td><td><code>5000</code></td><td>How often buffered vessel positions are flushed to clients.</td></tr>
+<tr><td><code>OSINT_AIRCRAFT_URL</code></td><td><code>https://opendata.adsb.fi/api/v2/mil</code></td><td>Military aircraft feed.</td></tr>
+<tr><td><code>OSINT_AIRCRAFT_MS</code></td><td><code>60000</code></td><td>Aircraft poll interval.</td></tr>
+<tr><td><code>OSINT_SEISMIC_URL</code></td><td>USGS feed</td><td>Earthquake feed URL.</td></tr>
+<tr><td><code>OSINT_SEISMIC_MS</code></td><td><code>180000</code></td><td>Seismic poll interval.</td></tr>
+<tr><td><code>OSINT_GEOMAG_MS</code></td><td><code>300000</code></td><td>Geomagnetic poll interval.</td></tr>
+<tr><td><code>OSINT_KEV_URL</code></td><td>CISA KEV catalog</td><td>Known-Exploited-Vulnerabilities feed.</td></tr>
+<tr><td><code>OSINT_FEODO_URL</code></td><td>Feodo tracker</td><td>Botnet C2 tracker feed.</td></tr>
+<tr><td><code>OSINT_CYBER_MS</code></td><td><code>3600000</code></td><td>Cyber-feed poll interval (one hour).</td></tr>
+<tr><td><code>OSINT_OUTAGE_SERVICES</code></td><td>built-in list</td><td>Services watched for outages.</td></tr>
+<tr><td><code>OSINT_OUTAGE_MS</code></td><td><code>120000</code></td><td>Outage poll interval.</td></tr>
+<tr><td><code>OSINT_IPWATCH_MS</code></td><td><code>300000</code></td><td>IP-watch poll interval.</td></tr>
+<tr><td><code>OSINT_PIZZA_URL</code></td><td>built-in</td><td>PizzINT venue-activity source.</td></tr>
+<tr><td><code>OSINT_PIZZA_KEY</code></td><td>—</td><td>Key for the above, if the source needs one.</td></tr>
+<tr><td><code>OSINT_POLL_MS</code></td><td><code>300000</code></td><td>PizzINT poll interval.</td></tr>
+</table>
+
+<h2>Where state lives on disk</h2>
+<p>Everything persistent lands under <code>HOMUNCULUS_DATA_DIR</code> (default <code>data/</code>), written through <code>server/stateStore.ts</code>. Back up this directory before upgrades.</p>
+<table>
+<tr><th>File</th><th>Contents</th></tr>
+<tr><td><code>layout.json</code></td><td>Tab and widget layout, shared by every client.</td></tr>
+<tr><td><code>setup.json</code></td><td>First-run wizard progress.</td></tr>
+<tr><td><code>archive-events.json</code></td><td>The on-disk event ring for the ARCHIVE tab (1000 events).</td></tr>
+<tr><td><code>osint-store.json</code></td><td>OSINT watcher state and geofence config.</td></tr>
+<tr><td><code>sync.json</code></td><td>Sync configuration.</td></tr>
+<tr><td><code>alerts.json</code></td><td>Crypto alert definitions.</td></tr>
+<tr><td><code>trades.json</code>, <code>closed-trades.json</code>, <code>pending.json</code></td><td>Trade records — open, closed, and pending.</td></tr>
+<tr><td><code>cost-basis.json</code>, <code>portfolio-baseline.json</code>, <code>portfolio-history.json</code></td><td>Portfolio accounting.</td></tr>
+<tr><td><code>active-bracket.json</code>, <code>active-plans.json</code>, <code>plan-report.json</code>, <code>plan-reports/</code></td><td>Strategy bracket and plan state.</td></tr>
+<tr><td><code>safe-mode.json</code>, <code>safe-mode-optout.json</code>, <code>restricted-symbols.json</code>, <code>auto-execute.json</code>, <code>loop-mode.json</code></td><td>Trading guardrails and execution mode.</td></tr>
+<tr><td><code>strategy-interval.json</code>, <code>strategy-intervals.json</code>, <code>btc-ladder-cycles.json</code>, <code>candle-cache.json</code></td><td>Strategy scheduling and cached market data.</td></tr>
+<tr><td><code>audit/*.jsonl</code></td><td>Append-only audit log.</td></tr>
+<tr><td><code>crypto/office/library/</code></td><td>Documents written by agents — a <code>.json</code> artifact plus a human-readable <code>.md</code> mirror.</td></tr>
+</table>
+
+<h2>Runtime key entry (the KEYS panel)</h2>
+<p>Keys can also be entered at runtime from SETTINGS → KEYS in the Electron desktop app. Those values live in an encrypted-at-rest vault owned by the Electron shell (<code>electron/vault.ts</code>, backed by Electron <code>safeStorage</code> → macOS Keychain, Windows DPAPI, or libsecret) and are pushed into the backend memory on connect. The backend never writes them to disk.</p>
+<ul>
+<li>A backend restart drops the vault; the Electron shell re-pushes on reconnect.</li>
+<li>A headless or Docker backend with no Electron client reads everything from <code>.env</code>, and the KEYS panel is read-only there.</li>
+<li>The unlock endpoint is localhost-only, so a phone or browser session across Tailscale cannot write keys.</li>
+</ul>
+
+</main>
+</div>
+
+<footer class="site-footer">Homunculus Core — starship-bridge command interface</footer>
+</body>
+</html>

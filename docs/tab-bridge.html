@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en" data-theme="prism">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BRIDGE Tab — Homunculus Core Docs</title>
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="holo-rule top"></div>
+<header class="site-header">
+  <a class="wordmark" href="index.html">HOMUNCULUS CORE</a>
+  <span class="sub">Documentation</span>
+</header>
+
+<div class="layout">
+<nav class="sidebar">
+  <div class="group">Start Here</div>
+  <a href="index.html">Overview</a>
+  <a href="getting-started.html">Getting Started</a>
+  <a href="faq.html">FAQ &amp; Troubleshooting</a>
+
+  <div class="group">Using the Bridge</div>
+  <a href="widgets-layout.html">Widgets &amp; Layout</a>
+  <a href="computer-core.html">Computer Core</a>
+  <a href="tab-bridge.html" class="active">BRIDGE Tab</a>
+  <a href="tab-osint.html">OSINT Tab</a>
+  <a href="tab-home.html">HOME Tab (Home Assistant)</a>
+  <a href="tab-data.html">DATA Tab</a>
+  <a href="tab-archive.html">ARCHIVE Tab</a>
+  <a href="tab-crypto.html">CRYPTO Tab</a>
+
+  <div class="group">Deploy &amp; Operate</div>
+  <a href="deployment.html">Deployment</a>
+  <a href="configuration.html">Configuration Reference</a>
+  <a href="security.html">Security</a>
+  <a href="upgrading.html">Upgrading</a>
+
+  <div class="group">Development</div>
+  <a href="architecture.html">Architecture</a>
+  <a href="protocol.html">WebSocket Protocol</a>
+  <a href="widget-development.html">Widget Development</a>
+  <a href="backend-modules.html">Backend Modules</a>
+  <a href="screener-engine.html">Screener Engine</a>
+  <a href="contributing.html">Contributing &amp; Testing</a>
+</nav>
+
+<main class="content">
+<h1>BRIDGE Tab</h1>
+<p class="lede">The default tab: live system vitals, the Computer Core chat, a real embedded terminal, and Home Assistant tiles, arranged on the standard widget grid.</p>
+
+<h2>What is on the tab</h2>
+<p>BRIDGE is the tab the bridge opens on (<code>defaultTab: 'BRIDGE'</code> in <code>shared/layout.ts</code>). Its stock layout is a 2 / 7 / 3 column split on the 12-column grid:</p>
+<table>
+  <thead><tr><th>Widget</th><th>Registry id</th><th>Default position</th></tr></thead>
+  <tbody>
+    <tr><td>System Vitals</td><td><code>system.vitals</code></td><td>Left rail, full height</td></tr>
+    <tr><td>Terminal</td><td><code>core.terminal</code></td><td>Center, top half</td></tr>
+    <tr><td>Computer Core</td><td><code>core.computer</code></td><td>Center, bottom half</td></tr>
+    <tr><td>Home Assistant</td><td><code>home.assistant</code></td><td>Right rail</td></tr>
+    <tr><td>Open Trades</td><td><code>crypto.opentrades</code></td><td>Right rail</td></tr>
+    <tr><td>Laundry</td><td><code>home.laundry</code></td><td>Right rail</td></tr>
+    <tr><td>Litter Robot</td><td><code>home.litter</code></td><td>Right rail</td></tr>
+  </tbody>
+</table>
+<p>Like every tab, this is only the starting arrangement — widgets can be moved, resized, or swapped for others from SETTINGS → WIDGETS, and the layout persists server-side so the desktop shell and any browser see the same grid. Terminal and Computer Core are <strong>singleton</strong> widgets: a second Terminal instance would fight the first over its PTY session id, so the picker allows at most one of each.</p>
+
+<h2>System Vitals</h2>
+<p>The left rail renders the live telemetry stream. On the backend (<code>server/telemetry.ts</code>), a single collector samples the machine through the <code>systeminformation</code> package on a <strong>2-second interval</strong>, and the interval only runs while at least one client is subscribed. Every snapshot is collected once and fanned out to all connected clients; a newly connected client is primed immediately with the latest snapshot.</p>
+<p>Each <code>TelemetrySnapshot</code> (typed in <code>shared/telemetry.ts</code>) carries:</p>
+<ul>
+  <li><strong>CPU</strong> — aggregate load, per-core load with a rolling 24-sample history (48 seconds at the 2s cadence), clock speed in GHz, and CPU temperature (current and max) where the platform exposes sensors.</li>
+  <li><strong>Memory</strong> — active/total bytes, percent used, and swap percent.</li>
+  <li><strong>Storage</strong> — used/total/percent of the largest filesystem.</li>
+  <li><strong>Network</strong> — receive and transmit rates in Mb/s summed across interfaces, plus lifetime byte totals.</li>
+  <li><strong>Processes</strong> — total task count and the top 6 processes by CPU.</li>
+  <li><strong>Uptime</strong> — seconds since boot.</li>
+</ul>
+<p>The widget (<code>src/panels/SystemVitals.tsx</code>) shows up to 8 CPU cores as sparklines with live percentages, RAM and SWAP meters, TEMP / MAX / TASKS stats, and a scrolling Top Processes table (pid, name, CPU%, with anything at 50%+ highlighted in amber). It is read-only — there are no controls.</p>
+
+<h2>Computer Core chat</h2>
+<p>The conversational interface to the Claude-powered assistant. The full assistant is documented on the <a href="computer-core.html">Computer Core</a> page; the widget itself (<code>src/panels/ComputerCore.tsx</code>) exposes:</p>
+<ul>
+  <li><strong>Transcript</strong> — turns labeled COMMAND (you), COMPUTER (the assistant), and CORE ALERT (proactive messages the backend broadcasts on its own, e.g. an appliance finishing). Streaming turns show a blinking cursor.</li>
+  <li><strong>Quick commands</strong> — one-tap buttons for <code>Status sweep</code>, <code>Home state report</code>, <code>Goodnight routine</code>, and <code>Away mode</code>.</li>
+  <li><strong>Input line and EXEC button</strong> — Enter or EXEC submits; both are disabled while a turn is in flight.</li>
+  <li><strong>Status readout</strong> — STANDING BY, WORKING, or NO SESSION. When no local Claude session is configured, the input is disabled with the placeholder <code>Set CLAUDE_CODE_OAUTH_TOKEN in .env to engage…</code>.</li>
+  <li><strong>Model line</strong> — the active model (the <code>HOMUNCULUS_MODEL</code> override, or <code>local session</code> when unset).</li>
+</ul>
+<p>On the wire this is the <code>chat</code> channel: the client sends a turn with a client-generated id, and the server streams back <code>delta</code> messages followed by <code>done</code> (or <code>error</code>) correlated to that id (<code>shared/chat.ts</code>).</p>
+
+<h2>Terminal</h2>
+<p>A real shell, not an emulation of one. The frontend (<code>src/panels/Terminal.tsx</code>) is an xterm.js terminal with 1000 lines of scrollback that auto-fits its widget cell and re-fits on resize; the backend (<code>server/terminal.ts</code>) spawns a genuine PTY per terminal via <code>@homebridge/node-pty-prebuilt-multiarch</code>.</p>
+<ul>
+  <li><strong>Which shell:</strong> on Windows, <code>COMSPEC</code> or <code>powershell.exe</code>; elsewhere, <code>$SHELL</code> or <code>/bin/bash</code>. It starts in the server user's home directory with <code>TERM=xterm-256color</code>.</li>
+  <li><strong>Coalesced output:</strong> PTY output is buffered and flushed roughly once per frame — every 16&nbsp;ms or whenever 64&nbsp;KB accumulates — so a torrent of output becomes about one WebSocket message per frame instead of thousands of tiny ones (the eDEX-UI RAM problem the comment in the file names).</li>
+  <li><strong>Protocol:</strong> the <code>term</code> channel carries <code>start</code> (with cols/rows), <code>input</code>, <code>resize</code>, <code>kill</code>, <code>data</code>, and <code>exit</code> messages (<code>shared/terminal.ts</code>). Closing the widget kills its PTY; disconnecting kills all PTYs for that connection.</li>
+  <li><strong>Graceful degradation:</strong> if the native PTY module is missing, only the terminal goes offline — it prints <code>[ Terminal offline ]</code> with instructions to run <code>npm run rebuild</code>, and the rest of the server keeps working.</li>
+</ul>
+
+<div class="callout warn"><span class="callout-title">Warning</span> The shell runs <strong>on the backend host</strong>, as the user the backend runs as. In Docker that means it is the <strong>container's</strong> shell, not your host machine's — by default telemetry and the terminal both reflect the container. See the commented host-scope options in <code>docker-compose.yml</code> if you want to monitor or shell the host instead. Anyone who can reach the bridge UI can type into this shell, which is one reason remote access requires <code>HOMUNCULUS_TOKEN</code>.</div>
+
+<h2>Home Assistant tiles</h2>
+<p>The right rail is Home Assistant at a glance. All of these render from the HA snapshot the backend polls over the HA REST API (<code>HA_URL</code> + <code>HA_TOKEN</code>); when HA is not configured they show a setup hint or hide themselves entirely.</p>
+
+<h3>Home Assistant (climate)</h3>
+<p><code>src/panels/HomeAssistant.tsx</code> shows a LINKED / OFFLINE / CONNECTING status, an OPEN&nbsp;↗ link to the HA web UI (with the hostname rewritten when you're browsing remotely, so the link still points at the machine running HA), and a card per climate entity: name, HVAC action badge (heating in crimson, cooling in blue, idle dimmed), current temperature, target (single or low–high range), and relative humidity. Clicking a card opens a thermostat control — the default variant is a dual-handle range slider — which sends <code>climate.set_temperature</code> and <code>climate.set_hvac_mode</code> service calls back through the WebSocket.</p>
+
+<h3>Laundry</h3>
+<p>Animated washer and dryer tiles built from HA sensors (<code>sensor.washer_current_status</code>, remaining/total time, power switches). Each shows a progress ring, the current phase (washing, rinsing, spinning, drying, cooling), time remaining, and a "Complete" state with when it finished. Controls send real HA service calls: power via <code>switch.turn_on</code>/<code>turn_off</code> and cycle operations via <code>select.select_option</code>.</p>
+
+<h3>Litter Robot</h3>
+<p>Status tile for a Litter-Robot exposed through HA: litter level and waste-drawer percentages (color-shifting as they run low or fill up), dock/cleaning state, cat-detected state with the pet's weight, and hopper status.</p>
+
+<h3>Colony and Ambient</h3>
+<p>Two further HOME-category tiles that can be placed on BRIDGE: <strong>Colony</strong> is a per-cat table of litter-box visits today and last known weight; <strong>Ambient</strong> shows the current weather condition and temperature, the next sunset or sunrise, and the HA backup manager's state. Both are read-only.</p>
+
+<div class="callout"><span class="callout-title">Note</span> The laundry, litter, colony, and ambient tiles key off specific entity ids from the author's own HA install (e.g. <code>sensor.washer_current_status</code>, <code>vacuum.r2peepoo_litter_box</code>, <code>weather.forecast_home</code>). If your HA does not expose those entities, the tiles render nothing — the generic climate widget and the HOME tab work with any HA instance.</div>
+
+<h2>Open Trades</h2>
+<p>A compact CRYPTO-category widget included in the stock BRIDGE layout, showing open positions from the crypto subsystem. The full trading surface lives on the <a href="tab-crypto.html">CRYPTO tab</a>.</p>
+
+</main>
+</div>
+
+<footer class="site-footer">Homunculus Core — starship-bridge command interface</footer>
+</body>
+</html>

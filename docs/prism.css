@@ -1,0 +1,406 @@
+/* ── Homunculus Core documentation — Prism theme ─────────────────────────
+   Tokens lifted from src/styles/global.css [data-theme="prism"]:
+   iridescent light-field over deep indigo-black. Cyan primary bleeding to
+   violet and hot magenta, with animated rainbow sweeps on decorative edges.
+   Solid tokens stay readable; the motion lives on the chrome. */
+
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Share+Tech+Mono&family=Megrim&display=swap');
+
+:root {
+  /* ── Backgrounds (deep indigo-black) ── */
+  --bg: #05030a;
+  --bg-panel: #08050f;
+  --bg-elev: #0b0716;
+  --bg-meter: #120a20;
+
+  /* ── Primary — holographic cyan ── */
+  --green: #38e8ff;
+  --green-soft: #c9b8ff;
+  --green-dim: #6a4a8f;
+  --green-line: #2a1a4a;
+
+  /* ── Alert / status ── */
+  --crimson: #ff3d9a;
+  --amber: #ffcc44;
+  --cool-color: #7aa8ff;
+
+  /* ── Borders / glows ── */
+  --border: #38e8ff1e;
+  --border-strong: #a878ff40;
+  --border-crimson: #ff3d9a33;
+  --glow-green: 0 0 6px #38e8ff55;
+  --glow-crimson: 0 0 6px #ff3d9a66;
+  --glow-text: #a878ff66;
+
+  /* ── Holo — iridescent field ── */
+  --holo: #46f0ff;
+  --holo-dim: #8a6ad0;
+  --blue: #7aa8ff;
+
+  /* ── Iridescent gradient ── */
+  --prism-grad: linear-gradient(100deg, #46f0ff, #a878ff, #ff3d9a, #ffcc44, #46f0ff);
+
+  /* ── Tiles / chrome ── */
+  --holo-tile-bg: #0b0716cc;
+  --holo-tile-border: #a878ff4d;
+  --tab-active-bg: #180f30;
+  --tab-inactive-bg: #0b0716;
+  --card-active-bg: #241245;
+  --card-inactive-bg: #100a20;
+  --header-top: #0e0a1c;
+  --header-bot: #06040e;
+  --scanline: #a878ff08;
+
+  /* ── Typography ── */
+  --font-mono: 'Share Tech Mono', ui-monospace, monospace;
+  --font-display: 'Orbitron', sans-serif;
+  --font-wordmark: 'Megrim', 'Orbitron', sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--green-soft);
+  font-family: var(--font-mono);
+  font-size: 15px;
+  line-height: 1.65;
+}
+
+/* CRT scanline wash over everything, like the app */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent 0px, transparent 2px,
+    var(--scanline) 2px, var(--scanline) 4px
+  );
+  z-index: 9999;
+}
+
+/* ── Header ── */
+.site-header {
+  background: linear-gradient(to bottom, var(--header-top), var(--header-bot));
+  border-bottom: 1px solid var(--border-strong);
+  padding: 18px 28px 14px;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  display: flex;
+  align-items: baseline;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.wordmark {
+  font-family: var(--font-wordmark);
+  font-size: 26px;
+  letter-spacing: 4px;
+  color: var(--holo);
+  text-shadow: 0 0 12px #46f0ff66;
+  text-decoration: none;
+}
+a.wordmark:hover { color: var(--green-soft); }
+
+.site-header .sub {
+  font-family: var(--font-display);
+  font-size: 11px;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+  color: var(--green-dim);
+}
+
+/* Animated prism rule under the header */
+@keyframes prism-flow {
+  0%   { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+
+.holo-rule {
+  height: 2px;
+  width: 100%;
+  background: var(--prism-grad);
+  background-size: 200% 100%;
+  animation: prism-flow 6s linear infinite;
+  position: fixed;
+  left: 0;
+  z-index: 101;
+}
+.holo-rule.top { top: 0; }
+
+/* ── Layout ── */
+.layout {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  gap: 0;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; }
+  .sidebar { position: static !important; height: auto !important; border-right: none !important; }
+}
+
+/* ── Sidebar nav ── */
+.sidebar {
+  border-right: 1px solid var(--border);
+  padding: 26px 18px 40px;
+  position: sticky;
+  top: 62px;
+  height: calc(100vh - 62px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--green-line) transparent;
+}
+
+.sidebar .group {
+  font-family: var(--font-display);
+  font-size: 10px;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+  color: var(--green);
+  text-shadow: 0 0 6px var(--glow-text);
+  margin: 22px 0 8px;
+}
+.sidebar .group:first-child { margin-top: 0; }
+
+.sidebar a {
+  display: block;
+  color: var(--green-soft);
+  text-decoration: none;
+  font-size: 13px;
+  padding: 4px 10px;
+  border-left: 2px solid transparent;
+  opacity: 0.75;
+}
+
+.sidebar a:hover {
+  opacity: 1;
+  color: var(--holo);
+  border-left-color: var(--holo);
+  background: var(--tab-active-bg);
+}
+
+.sidebar a.active {
+  opacity: 1;
+  color: var(--holo);
+  border-left-color: var(--crimson);
+  background: var(--tab-active-bg);
+}
+
+/* ── Content ── */
+.content {
+  padding: 34px 44px 90px;
+  min-width: 0;
+}
+
+.content h1 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 24px;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+  margin: 0 0 6px;
+  /* prism gradient text, like the app's panel labels */
+  background: var(--prism-grad);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: prism-flow 6s linear infinite;
+}
+
+.content .lede {
+  color: var(--green-dim);
+  font-size: 14px;
+  margin: 0 0 30px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 18px;
+}
+
+.content h2 {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: 16px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--green);
+  text-shadow: 0 0 8px var(--glow-text);
+  margin: 44px 0 12px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.content h3 {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: 13px;
+  letter-spacing: 1.5px;
+  color: var(--holo);
+  margin: 28px 0 8px;
+}
+
+.content a { color: var(--holo); text-decoration: none; border-bottom: 1px dotted var(--holo-dim); }
+.content a:hover { color: var(--crimson); border-bottom-color: var(--crimson); }
+
+.content p { margin: 0 0 14px; }
+.content ul, .content ol { margin: 0 0 14px; padding-left: 26px; }
+.content li { margin-bottom: 5px; }
+.content strong { color: #eee0ff; }
+.content em { color: var(--amber); font-style: normal; }
+
+/* ── Code ── */
+code {
+  font-family: var(--font-mono);
+  background: var(--bg-meter);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 13px;
+  color: var(--holo);
+}
+
+pre {
+  background: var(--bg-panel);
+  border: 1px solid var(--holo-tile-border);
+  border-radius: 4px;
+  box-shadow: inset 0 0 30px #c060ff0a, 0 0 12px #46f0ff14;
+  padding: 14px 18px;
+  overflow-x: auto;
+  margin: 0 0 18px;
+}
+
+pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--green-soft);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+/* ── Tables ── */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 20px;
+  font-size: 13px;
+}
+
+th {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: 10px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--green);
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-strong);
+  background: var(--tab-inactive-bg);
+}
+
+td {
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+tr:hover td { background: var(--tab-active-bg); }
+
+/* ── Callouts ── */
+.callout {
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--holo);
+  background: var(--holo-tile-bg);
+  padding: 12px 16px;
+  margin: 0 0 18px;
+  border-radius: 0 4px 4px 0;
+}
+
+.callout.warn { border-left-color: var(--amber); }
+.callout.danger { border-left-color: var(--crimson); box-shadow: var(--glow-crimson); }
+
+.callout .callout-title {
+  font-family: var(--font-display);
+  font-size: 10px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  display: block;
+  margin-bottom: 4px;
+  color: var(--holo);
+}
+.callout.warn .callout-title { color: var(--amber); }
+.callout.danger .callout-title { color: var(--crimson); }
+
+/* ── Card grid (index page) ── */
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
+  margin: 0 0 30px;
+}
+
+a.card {
+  display: block;
+  border: 1px solid var(--holo-tile-border);
+  background: var(--holo-tile-bg);
+  border-radius: 4px;
+  padding: 16px 18px;
+  text-decoration: none;
+  color: var(--green-soft);
+  box-shadow: inset 0 0 24px #c060ff0d;
+  transition: border-color .15s, box-shadow .15s;
+}
+
+a.card:hover {
+  border-color: var(--holo);
+  box-shadow: 0 0 14px #46f0ff33, inset 0 0 24px #c060ff14;
+}
+
+a.card .card-title {
+  font-family: var(--font-display);
+  font-size: 12px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--holo);
+  display: block;
+  margin-bottom: 6px;
+}
+
+a.card .card-desc { font-size: 12.5px; opacity: .8; }
+
+/* ── Keyboard / badge chips ── */
+.chip {
+  display: inline-block;
+  font-family: var(--font-display);
+  font-size: 9px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  padding: 2px 7px;
+  color: var(--green);
+  background: var(--tab-inactive-bg);
+  margin-right: 6px;
+}
+
+/* ── Footer ── */
+.site-footer {
+  border-top: 1px solid var(--border);
+  padding: 18px 28px 26px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--green-dim);
+  font-family: var(--font-display);
+  letter-spacing: 2px;
+  text-transform: uppercase;
+}

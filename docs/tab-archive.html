@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en" data-theme="prism">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ARCHIVE Tab — Homunculus Core Docs</title>
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="holo-rule top"></div>
+<header class="site-header">
+  <a class="wordmark" href="index.html">HOMUNCULUS CORE</a>
+  <span class="sub">Documentation</span>
+</header>
+
+<div class="layout">
+<nav class="sidebar">
+  <div class="group">Start Here</div>
+  <a href="index.html">Overview</a>
+  <a href="getting-started.html">Getting Started</a>
+  <a href="faq.html">FAQ &amp; Troubleshooting</a>
+
+  <div class="group">Using the Bridge</div>
+  <a href="widgets-layout.html">Widgets &amp; Layout</a>
+  <a href="computer-core.html">Computer Core</a>
+  <a href="tab-bridge.html">BRIDGE Tab</a>
+  <a href="tab-osint.html">OSINT Tab</a>
+  <a href="tab-home.html">HOME Tab (Home Assistant)</a>
+  <a href="tab-data.html">DATA Tab</a>
+  <a href="tab-archive.html" class="active">ARCHIVE Tab</a>
+  <a href="tab-crypto.html">CRYPTO Tab</a>
+
+  <div class="group">Deploy &amp; Operate</div>
+  <a href="deployment.html">Deployment</a>
+  <a href="configuration.html">Configuration Reference</a>
+  <a href="security.html">Security</a>
+  <a href="upgrading.html">Upgrading</a>
+
+  <div class="group">Development</div>
+  <a href="architecture.html">Architecture</a>
+  <a href="protocol.html">WebSocket Protocol</a>
+  <a href="widget-development.html">Widget Development</a>
+  <a href="backend-modules.html">Backend Modules</a>
+  <a href="screener-engine.html">Screener Engine</a>
+  <a href="contributing.html">Contributing &amp; Testing</a>
+</nav>
+
+<main class="content">
+<h1>ARCHIVE Tab</h1>
+<p class="lede">The ship's log — a persisted, filterable console of every notable event the bridge emits.</p>
+
+<p>The ARCHIVE tab is the ship's log: a persisted, reverse-chronological, colour-coded console of every notable event the system emits — proactive alerts, OSINT escalations, geofence breaches, device events, system messages. It is backed by the <code>ArchiveHub</code> (<code>server/archive.ts</code>) over the <code>archive</code> WebSocket channel.</p>
+
+<h2>What lands in the archive</h2>
+<p>The hub subscribes to every proactive broadcast the bridge makes (<code>addProactiveListener</code>) and records it. That means anything that would toast at you, or speak up unprompted in the Computer Core, is captured here — the archive is the durable record of the same stream.</p>
+
+<p>Each event carries:</p>
+<table>
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td><code>id</code></td><td>Unique event id.</td></tr>
+<tr><td><code>ts</code></td><td>Epoch milliseconds when it was recorded.</td></tr>
+<tr><td><code>source</code></td><td>Originating subsystem — drives the source filter and the colour of the source chip.</td></tr>
+<tr><td><code>severity</code></td><td><code>info</code>, <code>notice</code>, <code>warn</code>, or <code>critical</code>.</td></tr>
+<tr><td><code>title</code></td><td>Short summary line.</td></tr>
+<tr><td><code>body</code></td><td>The full event text.</td></tr>
+</table>
+
+<h3>Sources</h3>
+<p><code>OSINT</code>, <code>HOME</code>, <code>COMPUTER</code>, <code>CRYPTO</code>, <code>FINANCE</code>, <code>SYSTEM</code>.</p>
+
+<h3>Severities</h3>
+<table>
+<tr><th>Severity</th><th>Rank</th><th>Colour</th></tr>
+<tr><td><code>info</code></td><td>0</td><td>dim</td></tr>
+<tr><td><code>notice</code></td><td>1</td><td>primary</td></tr>
+<tr><td><code>warn</code></td><td>2</td><td>amber</td></tr>
+<tr><td><code>critical</code></td><td>3</td><td>crimson</td></tr>
+</table>
+
+<div class="callout"><span class="callout-title">Note</span> An emitter that attaches no <code>ProactiveMeta</code> gets classified <code>SYSTEM</code> / <code>notice</code>, with a title derived from the message text — the hub strips a leading "Captain —" and takes everything up to the first sentence-ending punctuation, capped at 80 characters.</div>
+
+<h2>Using the console</h2>
+<p>Events render newest-first. Three filters narrow the view and compose with each other:</p>
+<ul>
+<li><strong>Source</strong> — restrict to one or more subsystems.</li>
+<li><strong>Minimum severity</strong> — set to <code>warn</code> to hide routine chatter and see only what needed attention.</li>
+<li><strong>Free-text search</strong> — matches against event text.</li>
+</ul>
+
+<h2>Storage and retention</h2>
+<p>The archive has two tiers, and which you get depends on whether Postgres is configured.</p>
+
+<h3>Always: the on-disk ring</h3>
+<p>The hub keeps a bounded in-memory ring persisted to <code>data/archive-events.json</code>, so history survives a restart with no database at all.</p>
+<table>
+<tr><th>Bound</th><th>Value</th><th>Meaning</th></tr>
+<tr><td><code>RING</code></td><td>1000</td><td>Events retained in memory and on disk. Older events roll off.</td></tr>
+<tr><td><code>SNAPSHOT</code></td><td>300</td><td>Events sent to a client when it subscribes.</td></tr>
+</table>
+
+<h3>With <code>DATABASE_URL</code>: durable history</h3>
+<p>The hub writes through to Postgres for durable, unbounded history. The ring stays as the fast local copy; the database is what survives losing the working directory.</p>
+
+<div class="callout warn"><span class="callout-title">Warning</span> Without Postgres you keep the most recent 1000 events and nothing more. If the archive is meant to be a record you can go back to months later, configure <code>DATABASE_URL</code>.</div>
+
+<h2>Live behaviour</h2>
+<p>On <code>subscribe</code> a client receives an <code>archive:snapshot</code> of the recent slice, then one <code>archive:event</code> push per new event. See <a href="protocol.html">the protocol reference</a> for the exact message shapes.</p>
+
+<h2>The archive and the Computer Core</h2>
+<p>Most events are also injected into the Computer Core conversation, so the assistant knows what the ship has been logging and can answer questions about it. Emitters can opt out by setting <code>chatLog: false</code> in their metadata — device and crypto events do exactly that, to avoid flooding the chat with routine state changes. Those events still toast and still archive; they just do not enter the conversation.</p>
+
+<h2>Backing it up</h2>
+<pre><code># The on-disk ring
+cp data/archive-events.json archive-events.bak.json
+
+# Durable history, if you run Postgres
+docker compose exec db pg_dump -U homunculus homunculus &gt; homunculus.sql</code></pre>
+<p>See <a href="upgrading.html">Upgrading</a> for the full backup and rollback procedure.</p>
+
+<h2>Related</h2>
+<ul>
+<li><a href="tab-data.html">DATA tab</a> — continuous time-series rather than discrete events.</li>
+<li><a href="security.html">Security</a> — the audit log (<code>data/audit/*.jsonl</code>) is a separate, append-only record of privileged actions, distinct from this event archive.</li>
+</ul>
+
+</main>
+</div>
+
+<footer class="site-footer">Homunculus Core — starship-bridge command interface</footer>
+</body>
+</html>

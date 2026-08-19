@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en" data-theme="prism">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Backend Modules — Homunculus Core Docs</title>
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="holo-rule top"></div>
+<header class="site-header">
+  <a class="wordmark" href="index.html">HOMUNCULUS CORE</a>
+  <span class="sub">Documentation</span>
+</header>
+
+<div class="layout">
+<nav class="sidebar">
+  <div class="group">Start Here</div>
+  <a href="index.html">Overview</a>
+  <a href="getting-started.html">Getting Started</a>
+  <a href="faq.html">FAQ &amp; Troubleshooting</a>
+
+  <div class="group">Using the Bridge</div>
+  <a href="widgets-layout.html">Widgets &amp; Layout</a>
+  <a href="computer-core.html">Computer Core</a>
+  <a href="tab-bridge.html">BRIDGE Tab</a>
+  <a href="tab-osint.html">OSINT Tab</a>
+  <a href="tab-home.html">HOME Tab (Home Assistant)</a>
+  <a href="tab-data.html">DATA Tab</a>
+  <a href="tab-archive.html">ARCHIVE Tab</a>
+  <a href="tab-crypto.html">CRYPTO Tab</a>
+
+  <div class="group">Deploy &amp; Operate</div>
+  <a href="deployment.html">Deployment</a>
+  <a href="configuration.html">Configuration Reference</a>
+  <a href="security.html">Security</a>
+  <a href="upgrading.html">Upgrading</a>
+
+  <div class="group">Development</div>
+  <a href="architecture.html">Architecture</a>
+  <a href="protocol.html">WebSocket Protocol</a>
+  <a href="widget-development.html">Widget Development</a>
+  <a href="backend-modules.html" class="active">Backend Modules</a>
+  <a href="screener-engine.html">Screener Engine</a>
+  <a href="contributing.html">Contributing &amp; Testing</a>
+</nav>
+
+<main class="content">
+<h1>Backend Modules</h1>
+<p class="lede">Conventions in server/, the hub and persistence patterns, and how to add a subsystem end to end.</p>
+
+<p>The backend is one Node process. Each subsystem is a module in <code>server/</code> with a colocated test file, and <code>server/index.ts</code> is the only place they are wired together: it owns the HTTP server, the WebSocket server, the REST routing table, and the startup sequence.</p>
+
+<h2>Conventions</h2>
+<ul>
+<li><strong>One module per subsystem</strong>, named for what it does: <code>telemetry.ts</code>, <code>terminal.ts</code>, <code>chat.ts</code>, <code>homeassistant.ts</code>, <code>osint.ts</code>, <code>archive.ts</code>, <code>crypto.ts</code>.</li>
+<li><strong>Tests sit beside the code</strong> — <code>osint.ts</code> and <code>osint.test.ts</code> in the same directory. Nearly every module in <code>server/</code> has one.</li>
+<li><strong>Most modules export a singleton hub</strong> (<code>telemetryHub</code>, <code>haHub</code>, <code>osintHub</code>, <code>archiveHub</code>, <code>cryptoHub</code>, <code>historyHub</code>) rather than a class the caller instantiates. Per-connection things are classes instead: <code>ChatSession</code> and <code>TerminalManager</code> are constructed once per WebSocket with that socket <code>send</code> function.</li>
+<li><strong><code>shared/</code> is the type contract.</strong> A module that speaks to the client defines its shapes in <code>shared/</code> so the server and the React code compile against the same definitions. Pure logic that both sides need — indicator math, layout sanitisation, screener rules, alert classification — lives there too, with its own tests.</li>
+<li><strong>Long comments explain decisions, not mechanics.</strong> The house style is a header block stating why the module looks the way it does. Follow it: the reasoning is the part that gets lost.</li>
+</ul>
+
+<h2>The hub pattern</h2>
+<p>A hub owns some external resource — a poller, a subscription, a device connection — and fans updates out to listeners. The shape is consistent:</p>
+<ul>
+<li><code>start()</code> begins whatever polling or connecting it does, called from the startup sequence in <code>index.ts</code>.</li>
+<li>Listeners subscribe and receive a snapshot plus subsequent updates; subscribing returns an unsubscribe function.</li>
+<li>Reference counting matters. <code>TelemetryHub</code> only stops collecting once its listener count hits zero — a subscriber that is never removed pins an expensive collect loop forever. This has bitten before: <code>HistoryHub.enabled</code> once reported <code>!!DATABASE_URL</code>, which stayed true even when the connection failed, so <code>index.ts</code> installed a permanent subscriber feeding a dead sink and pinned the 2-second telemetry loop with no UI attached. <strong>If your hub exposes an <code>enabled</code> flag, make it mean "actually working", not "configured".</strong></li>
+</ul>
+
+<h2>Persistence</h2>
+<p>Every hub persists the same way: read a JSON file at import time, rewrite the whole file on every change. That pattern is load-bearing and deeply synchronous — <code>cryptoHub</code> reads its trades while constructing a snapshot, <code>agentFleet</code> reads at module scope — so it could not simply be made async.</p>
+
+<p><code>server/stateStore.ts</code> resolves this by changing <em>where</em> the data lives, not how the code reads it. <code>readJson</code> / <code>writeJson</code> are drop-in replacements for the <code>readFileSync</code> / <code>writeFileSync</code> pair, keyed by the same file path:</p>
+
+<pre><code>postgres: app_state(key, value)   durable system of record
+data/**/*.json                    local replica, written synchronously</code></pre>
+
+<ul>
+<li><strong>Postgres is authoritative</strong> when configured: durable, queryable, backed up as one unit, and it survives losing the working directory.</li>
+<li><strong>The files remain</strong> as a synchronously-written local replica — which is what lets a hub boot before any connection exists, and what keeps the app fully functional with <code>DATABASE_URL</code> unset.</li>
+<li><strong>Both copies are written on every change</strong>, so neither drifts. <code>reconcile()</code> runs at startup and reports it if they ever do.</li>
+<li>The key is derived from the path under <code>data/</code> — <code>data/crypto/trades.json</code> → <code>crypto/trades.json</code> — so no hub has to invent or remember a name.</li>
+</ul>
+
+<p>Use <code>stateStore</code> for anything a restart must not lose. The same discipline governs <code>server/auditLog.ts</code>, for the same reason: a write that only reaches a database that happens to be down is a write that did not happen.</p>
+
+<h2>How index.ts wires it together</h2>
+
+<h3>HTTP and REST</h3>
+<p><code>index.ts</code> serves the built web UI from <code>HOMUNCULUS_WEB_DIR</code> and routes <code>/api/</code> requests. Sensitive routes call <code>requireToken(req, res)</code> first, which returns <code>false</code> having already written the error response — so the handler just returns. Audit management calls <code>requireAdminToken</code> instead. Larger areas delegate to their own handler module; the screener API is a good example, routed through <code>handleScreenerRequest</code> rather than inlined.</p>
+
+<h3>WebSocket</h3>
+<p>On each connection <code>index.ts</code> builds a <code>send</code> function that JSON-encodes to the socket if it is still open, constructs a <code>ChatSession</code> and a <code>TerminalManager</code> bound to it, registers a proactive listener, and holds unsubscribe handles for every hub subscription so they can all be torn down on close.</p>
+
+<p>Messages are dispatched on the <code>ch</code> + <code>type</code> discriminated union from <code>shared/protocol.ts</code>. Malformed JSON is dropped silently.</p>
+
+<div class="callout warn"><span class="callout-title">Warning</span> The terminal channel re-checks the token itself. The upgrade handler waives the token for a local socket — sensible for the dashboard, but not for a channel that hands out a shell carrying the process environment. Opening a PTY always costs the real secret once one is configured, regardless of where the socket dialled in from. Preserve that check if you touch the connection handler.</div>
+
+<h3>Startup sequence</h3>
+<p>Order matters. <code>stateStore.start()</code> and <code>auditLog.start()</code> come first — they run migrations and reconciliation that other modules depend on. Then the hubs start: <code>proactiveMonitor</code>, <code>osintHub</code>, <code>homeWatcher</code>, <code>cryptoHub</code>, <code>historyHub</code>, and <code>archiveHub</code> once history has settled.</p>
+
+<h2>Adding a subsystem end to end</h2>
+
+<p><strong>1. Define the contract in <code>shared/</code>.</strong> A new file with your snapshot and payload types, plus any pure logic and its test.</p>
+
+<p><strong>2. Add the messages to <code>shared/protocol.ts</code>.</strong> Extend <code>ClientMsg</code> and <code>ServerMsg</code> with your channel. Follow the subscribe/update convention:</p>
+<pre><code>| { ch: 'weather'; type: 'subscribe' }
+| { ch: 'weather'; type: 'update'; snapshot: WeatherSnapshot }</code></pre>
+
+<p><strong>3. Add the client-facing method to <code>shared/api.ts</code></strong> so panels stay transport-agnostic:</p>
+<pre><code>onWeather(handler: (snapshot: WeatherSnapshot) =&gt; void): () =&gt; void</code></pre>
+
+<p><strong>4. Write <code>server/weather.ts</code></strong> — a hub with <code>start()</code>, a listener set, and <code>stateStore</code> persistence if it needs any. Write <code>server/weather.test.ts</code> alongside it.</p>
+
+<p><strong>5. Wire it in <code>server/index.ts</code></strong> — import the hub, start it in the startup sequence, handle <code>subscribe</code> in the connection handler, and hold the unsubscribe for teardown.</p>
+
+<p><strong>6. Expose it in <code>src/transport.ts</code></strong>, implementing the <code>HomunculusApi</code> method. Track the subscription so it is replayed on reconnect.</p>
+
+<p><strong>7. Add the hook and the widget</strong> — <code>src/hooks/useWeather.ts</code>, then a panel and a registry entry. See <a href="widget-development.html">Widget Development</a>.</p>
+
+<p><strong>8. Add configuration</strong> to <code>.env.example</code> and to <a href="configuration.html">the configuration reference</a>. If it introduces a credential, add it to <code>SECRET_SPECS</code> in <code>shared/secrets.ts</code> and to <code>NEVER_FORWARDED</code> in <code>server/agentEnv.ts</code>.</p>
+
+<div class="callout danger"><span class="callout-title">Danger</span> Any new credential must be added to <code>NEVER_FORWARDED</code>. The allowlist in <code>agentEnv.ts</code> already blocks unknown variables, but the explicit list is what states the intent to a future reader — and what protects you if someone later loosens the allowlist. See <a href="security.html">Security</a>.</div>
+
+<h2>Module map</h2>
+<table>
+<tr><th>Area</th><th>Modules</th></tr>
+<tr><td>Core</td><td><code>index.ts</code>, <code>telemetry.ts</code>, <code>terminal.ts</code>, <code>chat.ts</code>, <code>stateStore.ts</code>, <code>secrets.ts</code>, <code>auditLog.ts</code>, <code>format.ts</code></td></tr>
+<tr><td>Claude / agents</td><td><code>agents.ts</code>, <code>agentIntent.ts</code>, <code>agentEnv.ts</code>, <code>claudeProcesses.ts</code>, <code>claudeResult.ts</code></td></tr>
+<tr><td>Home Assistant</td><td><code>homeassistant.ts</code>, <code>haConfigFlow.ts</code>, <code>haAreaRegistry.ts</code>, <code>homewatch.ts</code>, <code>routines.ts</code></td></tr>
+<tr><td>OSINT</td><td><code>osint.ts</code>, <code>country-centroids.ts</code></td></tr>
+<tr><td>Data &amp; archive</td><td><code>history.ts</code>, <code>archive.ts</code>, <code>layout.ts</code>, <code>sync.ts</code></td></tr>
+<tr><td>Crypto</td><td><code>crypto.ts</code>, <code>cmc.ts</code>, <code>cryptoAlerts.ts</code>, <code>cryptoStrategySettings.ts</code>, <code>strategyRunner.ts</code>, <code>screenerApi.ts</code>, <code>screenerRunner.ts</code>, <code>screenerStore.ts</code></td></tr>
+<tr><td>Office</td><td><code>office.ts</code>, <code>library.ts</code>, <code>blockers.ts</code>, <code>managerFile.ts</code></td></tr>
+</table>
+
+</main>
+</div>
+
+<footer class="site-footer">Homunculus Core — starship-bridge command interface</footer>
+</body>
+</html>
