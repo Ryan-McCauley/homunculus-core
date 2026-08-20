@@ -698,3 +698,19 @@ describe('verifyDb', () => {
     expect((await m.auditLog.verify()).db).toBeUndefined()
   })
 })
+
+describe('likePrefix', () => {
+  it('turns a literal into a prefix pattern', async () => {
+    const { likePrefix } = await freshModule()
+    expect(likePrefix('agent.trade')).toBe('agent.trade%')
+  })
+
+  it('neutralises wildcards so Postgres answers what the file answers', async () => {
+    const { likePrefix } = await freshModule()
+    // `_` and `%` are wildcards to LIKE and ordinary characters to the file
+    // scan's startsWith. Escaped, both backends match the same set.
+    expect(likePrefix('agent_trade')).toBe('agent\\_trade%')
+    expect(likePrefix('%')).toBe('\\%%')
+    expect(likePrefix('a\\b')).toBe('a\\\\b%')
+  })
+})

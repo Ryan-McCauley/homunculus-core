@@ -58,6 +58,19 @@ function monthKey(at: Date): string {
   return `${at.getUTCFullYear()}-${String(at.getUTCMonth() + 1).padStart(2, '0')}`
 }
 
+/**
+ * A LIKE pattern that means "starts with this literal string", nothing more.
+ *
+ * `filter.action` is caller-supplied (?action= on the read route), so an
+ * unescaped `%` or `_` in it is a wildcard to Postgres and an ordinary character
+ * to readFromFiles' startsWith. The two backends answering the same query
+ * differently is a bug in a record whose whole value is that it is the same
+ * record however you read it.
+ */
+export function likePrefix(literal: string): string {
+  return literal.replace(/[\\%_]/g, (c) => `\\${c}`) + '%'
+}
+
 function hashEntry(entry: Omit<AuditEntry, 'hash'>): string {
   return createHash('sha256').update(canonicalJson(entry)).digest('hex')
 }
@@ -452,7 +465,7 @@ class AuditLog {
             ${filter.before !== undefined ? this.sql`AND seq < ${filter.before}` : this.sql``}
             ${filter.actor ? this.sql`AND actor = ${filter.actor}` : this.sql``}
             ${filter.resource ? this.sql`AND resource = ${filter.resource}` : this.sql``}
-            ${filter.action ? this.sql`AND action LIKE ${filter.action + '%'}` : this.sql``}
+            ${filter.action ? this.sql`AND action LIKE ${likePrefix(filter.action)} ESCAPE '\\'` : this.sql``}
             ${filter.since ? this.sql`AND ts >= ${filter.since}` : this.sql``}
             ${filter.until ? this.sql`AND ts <= ${filter.until}` : this.sql``}
           ORDER BY seq DESC LIMIT ${limit}

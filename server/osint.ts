@@ -124,8 +124,27 @@ function haversineKm(aLat: number, aLng: number, bLat: number, bLng: number): nu
     Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLng / 2) ** 2
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(s)))
 }
+
+/**
+ * Ceiling on a single feed request.
+ *
+ * Node's fetch has no default timeout, so a third-party feed that accepts the
+ * connection and then never answers leaves the promise pending forever — and
+ * `schedule` fires the poller again on its interval regardless, so one wedged
+ * host accumulates one stuck request per interval for the life of the process,
+ * each holding a socket. It also strands refreshNow(), whose Promise.allSettled
+ * cannot settle, leaving the client's REFRESH button spinning indefinitely.
+ *
+ * 15s is comfortably longer than any of these feeds takes and shorter than the
+ * fastest poll interval (aircraft, 60s), so a slow round never overlaps the next.
+ * Every other outbound call in this codebase is bounded the same way — see
+ * REQUEST_TIMEOUT_MS in server/sync.ts and the AbortSignal.timeout calls in
+ * server/crypto.ts.
+ */
+const FEED_TIMEOUT_MS = Number(process.env['OSINT_FEED_TIMEOUT_MS'] || 15_000)
+
 async function fetchJson(url: string, init?: RequestInit): Promise<unknown> {
-  const res = await fetch(url, init)
+  const res = await fetch(url, { signal: AbortSignal.timeout(FEED_TIMEOUT_MS), ...init })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return res.json()
 }
@@ -358,6 +377,8 @@ class OsintHub {
   private geofencePrimed = new Set<BreachKind>()
   private lastGeofenceAlert = 0
   private timers: NodeJS.Timeout[] = []
+  /** Pollers currently in flight, so a slow round is skipped rather than stacked. */
+  private polling = new Set<() => Promise<void>>()
   private started = false
 
   // AIS websocket state.
@@ -386,9 +407,24 @@ class OsintHub {
     console.log('[osint] started — pizza/seismic/aircraft/geomag/cyber/outage/ipwatch/vessel watchers online')
   }
 
+  /**
+   * Runs a poller now and on an interval, never twice at once.
+   *
+   * The overlap guard is belt-and-braces next to FEED_TIMEOUT_MS: a poller that
+   * runs longer than its interval (several feeds behind one slow upstream, a
+   * machine that just woke from sleep with every timer due at once) would
+   * otherwise re-enter and have two rounds writing the same snapshot fields in
+   * whatever order they happened to finish. Skipping is the right answer for
+   * polled data — the next tick is along shortly with fresher numbers anyway.
+   */
   private schedule(fn: () => Promise<void>, ms: number): void {
-    void fn()
-    this.timers.push(setInterval(() => void fn(), ms))
+    const runOnce = async (): Promise<void> => {
+      if (this.polling.has(fn)) return
+      this.polling.add(fn)
+      try { await fn() } finally { this.polling.delete(fn) }
+    }
+    void runOnce()
+    this.timers.push(setInterval(() => void runOnce(), ms))
   }
 
   getLatest(): OsintSnapshot {
