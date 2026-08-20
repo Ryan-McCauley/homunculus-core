@@ -390,8 +390,15 @@ function RunLog({ runs }: { runs: AgentRun[] }) {
       {runs.map((r) => (
         <div key={r.id} style={{ border: BORDER, padding: 8 }}>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <Lbl c={r.state === 'error' ? CR : r.state === 'running' ? AM : G}>{r.state.toUpperCase()}</Lbl>
+            {/* A skip is dimmed, not green: nothing ran, nothing was decided, nothing
+                was spent — reading it as a completed run overstates the desk's coverage. */}
+            <Lbl c={r.state === 'error' ? CR : r.state === 'running' ? AM : r.state === 'skipped' ? GD : G}>
+              {r.state === 'error' && r.timedOut ? 'TIMEOUT' : r.state.toUpperCase()}
+            </Lbl>
             <Lbl>{r.trigger} · {ago(r.startedAt)}</Lbl>
+            {/* Collapsed skips stand for many wakes, so the count has to be visible or the
+                entry reads as a single quiet hour rather than a quiet day. */}
+            {r.state === 'skipped' && (r.skipCount ?? 1) > 1 && <Lbl c={GD}>×{r.skipCount}</Lbl>}
             {/* Which model produced this run — the setting can change between runs. */}
             {r.model && <Lbl c={GS}>{agentModelLabel(r.model).toLowerCase()}</Lbl>}
           </div>
@@ -1059,6 +1066,18 @@ function DeskInspector({ view, hr, onChanged, onOpenCubicle, onClose }: {
       </div>
 
       {view.status?.state === 'error' && <Lbl c={CR}>✗ {view.status.error}</Lbl>}
+      {/* The circuit breaker. A run that keeps dying at the deadline used to look like a
+          single failed run each time, so a 14-hour outage was invisible on this card. */}
+      {view.health.consecutiveTimeouts > 0 && (
+        <Lbl c={view.health.tripped ? CR : AM}>
+          {view.health.tripped ? '⚠ BREAKER TRIPPED' : '⏳ backing off'} — {view.health.consecutiveTimeouts} timeout
+          {view.health.consecutiveTimeouts === 1 ? '' : 's'} in a row
+          {view.health.suppressed && view.health.suppressedUntil
+            ? `, auto wakes held ${Math.max(0, Math.round((view.health.suppressedUntil - Date.now()) / 60_000))}m`
+            : ''}
+          {view.health.tripped ? ' · this agent is not covering its mandate — press RUN to test it' : ''}
+        </Lbl>
+      )}
       {view.decisions.length > 0 && <DecisionRows decisions={view.decisions.slice(0, 4)} />}
 
       <div style={{ display: 'flex', gap: 4, borderTop: BORDER, paddingTop: 10 }}>

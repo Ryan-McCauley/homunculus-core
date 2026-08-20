@@ -24,6 +24,7 @@ import type {
   JournalEntry, NewPersonnelInput, PersonnelRecord, SourceRef, Thought
 } from '../shared/office'
 import { DEFAULT_JOB_DESCRIPTION, DEFAULT_RESUME, STANDARD_SOURCES, parseMentions } from '../shared/office'
+import { ACTIVE_BOARD_TAG, activeBoardTitle, shouldRollBoard } from '../shared/activeBoard'
 import { stateStore } from './stateStore'
 import { auditLog } from './auditLog'
 
@@ -284,8 +285,54 @@ class Office {
     return this.board.find((t) => t.id === id) ?? null
   }
 
-  postThread(input: { title: string; body: string; authorId: string; tags?: string[] }, knownIds: string[]): BoardThread {
-    const now = Date.now()
+  /**
+   * The board the desk is currently posting to, or null when a fresh one is due.
+   *
+   * Found by tag rather than by a stored id: the id would be one more thing to keep in
+   * sync with a board that can be pruned out from under it, and the tag survives a
+   * restart, a prune and a hand-edited board file alike.
+   */
+  activeBoard(now: number = Date.now()): BoardThread | null {
+    let newest: BoardThread | null = null
+    for (const t of this.board) {
+      if (!t.tags.includes(ACTIVE_BOARD_TAG)) continue
+      if (t.resolved) continue
+      if (!newest || t.createdAt > newest.createdAt) newest = t
+    }
+    if (!newest) return null
+    if (shouldRollBoard({ createdAt: newest.createdAt, messageCount: newest.messages.length }, now)) return null
+    return newest
+  }
+
+  /**
+   * The active board, opening a fresh one under the manager's name if the current one has
+   * rolled. Every run announcement and every cycle post lands here, so "which thread?"
+   * stops being a question any agent has to answer.
+   */
+  ensureActiveBoard(managerId: string | null, knownIds: string[], now: number = Date.now()): BoardThread {
+    const live = this.activeBoard(now)
+    if (live) return live
+    const author = managerId ?? 'operator'
+    return this.postThread({
+      title: activeBoardTitle(now),
+      authorId: author,
+      tags: [ACTIVE_BOARD_TAG],
+      at: now,
+      body: `Desk board for ${new Date(now).toISOString().slice(0, 10)} (UTC). Every run is announced here and every cycle report is a reply here — colleagues do not open their own threads.`
+    }, knownIds)
+  }
+
+  /** Posts one line onto the active board, opening it first if need be. */
+  postToActiveBoard(input: { body: string; authorId: string; managerId: string | null }, knownIds: string[], now: number = Date.now()): BoardThread | null {
+    const board = this.ensureActiveBoard(input.managerId, knownIds, now)
+    return this.reply(board.id, { body: input.body, authorId: input.authorId }, knownIds)
+  }
+
+  /** `at` lets a caller that already has a clock (the run announcer, most importantly)
+   *  stamp the thread with the same instant it used to decide the board had rolled —
+   *  otherwise the roll decision and the timestamp it produces disagree. */
+  postThread(input: { title: string; body: string; authorId: string; tags?: string[]; at?: number }, knownIds: string[]): BoardThread {
+    const now = input.at ?? Date.now()
     const msg: BoardMessage = {
       id: randomUUID(),
       authorId: input.authorId,
@@ -333,11 +380,16 @@ class Office {
       (a.updatedAt - b.updatedAt) || (rank.get(b.id)! - rank.get(a.id)!)
 
     const drop = new Set<string>()
+    // The board the desk is posting to right now is never a prune candidate. It should
+    // always be the newest thread anyway, but pruning it would silently orphan every
+    // agent mid-cycle, and that is not a failure worth leaving to an ordering assumption.
+    const keep = this.activeBoard()?.id
     // Resolved threads go first at every age: a closed conversation has served its
     // purpose, and the audit log holds the durable record either way.
     for (const group of [this.board.filter((t) => t.resolved), this.board.filter((t) => !t.resolved)]) {
       for (const t of [...group].sort(oldestFirst)) {
         if (over <= 0) break
+        if (t.id === keep) continue
         drop.add(t.id); over--
       }
       if (over <= 0) break

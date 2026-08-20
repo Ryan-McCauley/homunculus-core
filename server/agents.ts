@@ -26,6 +26,11 @@ import {
   emptyAgentUsageTotals, isAgentModel, totalTokens
 } from '../shared/agents'
 import { pickRunOrder } from '../shared/agentScheduling'
+import { agentHealth, type AgentHealth } from '../shared/agentHealth'
+import { gateAppliesTo, gateVerdict, isAgentWakeGate, type AgentWakeGate, type GateProbe } from '../shared/agentGate'
+import { canAnswerInline, nextChain } from '../shared/inlineAnswer'
+import { narrateTool } from '../shared/toolNarration'
+import { runAnnouncement } from '../shared/activeBoard'
 import { assignmentBlock } from '../shared/managerFile'
 import type { CryptoSnapshot } from '../shared/crypto'
 import { cryptoHub } from './crypto'
@@ -41,6 +46,8 @@ import { constantTimeEquals } from '../shared/audit'
 import { claudeProcesses } from './claudeProcesses'
 import { claudeResultError } from './claudeResult'
 import { agentEnv } from './agentEnv'
+import { screenerStore } from './screenerStore'
+import { buildScreenerJob, runScreenerEngine, screenerInputsFromSnapshot } from './screenerRunner'
 
 const MODEL = process.env['HOMUNCULUS_MODEL'] || ''
 
@@ -112,6 +119,9 @@ interface AgentRecord {
   /** When its session was last released for being idle. */
   stoodDownAt?: number
   lastAutoRunAt?: number
+  /** When the timeout circuit breaker was last announced, so a tripped agent says so once
+   *  rather than on every subsequent timeout. Cleared by any completed run. */
+  breakerAnnouncedAt?: number
 }
 
 interface PersistShape {
@@ -418,6 +428,20 @@ on whom:
 cannot do your job until it is answered; "waiting" means you would like the answer but can
 carry on. Use "blocking" honestly — it stops your own automatic wake-ups.
 
+ASKING A COLLEAGUE WAKES THEM IMMEDIATELY. When 'askedOf' is another agent, the server
+starts a run for them the moment you ask, purely to answer you. The response to your POST
+tells you whether that happened ("wokeAnswerer": true). When it did, WAIT FOR THE ANSWER
+RATHER THAN ENDING YOUR RUN — poll your own blocker until it is answered:
+
+  curl -s "${apiBase}/api/crypto/office/blockers?token=${token}" | jq '.blockers[] | select(.id=="<id>")'
+
+Poll roughly every 10 seconds, up to about two minutes (a 'sleep 10' between polls is the
+right way to wait — do not spin). Answers usually land inside a minute. Finish your run
+with the answer folded in, so nothing is left open behind you.
+
+If 'askedOf' is the OPERATOR, nobody is woken — a human answers on human time. File it and
+carry on with whatever does not depend on it, or stand down and say so.
+
 THEN STOP ASKING. This is the rule that matters most on this desk:
 
   A raised question is on the record, permanently, with a timestamp and an owner. It does
@@ -639,8 +663,56 @@ class AgentFleet {
       chatUsage: rec.chatUsage ?? null,
       totals: rec.totals ?? null,
       blockers: blockerBoard.openFor(rec.agent.id),
-      stoodDown: !rec.sessionId && !!rec.stoodDownAt
+      stoodDown: !rec.sessionId && !!rec.stoodDownAt,
+      health: this.health(rec)
     }
+  }
+
+  // ── The timeout circuit breaker ──────────────────────────────────────────
+  //
+  // Runs that never settle are killed at RUN_TIMEOUT_MS, and the scheduler then fired the
+  // next interval straight into whatever caused the hang. On 2026-08-18 that produced an
+  // unbroken ~14-hour streak of dead Trap Steward runs — overnight, while an open position
+  // sat with no resting stop — and nothing said so, because each run merely "errored" and
+  // the next was already booked. Backing off is the cheap half; telling the operator is
+  // the half that matters.
+
+  private health(rec: AgentRecord, now: number = Date.now()): AgentHealth {
+    return agentHealth(rec.runs, now)
+  }
+
+  /** Called at each timeout. Announces the trip once — on the edge, not every time. */
+  private noteTimeout(rec: AgentRecord): void {
+    const h = this.health(rec)
+    const held = h.suppressedUntil ? `${Math.round((h.suppressedUntil - Date.now()) / 60_000)}m` : 'a moment'
+    office.think(rec.agent.id, {
+      kind: 'observation',
+      text: `Run timed out (${h.consecutiveTimeouts} in a row). Automatic wakes held for ${held}.`,
+      runId: null
+    })
+    if (!h.tripped || rec.breakerAnnouncedAt) return
+    rec.breakerAnnouncedAt = Date.now()
+    const msg = `${rec.agent.name} has timed out ${h.consecutiveTimeouts} runs in a row — automatic wakes are now backing off. This agent is NOT covering its mandate. Check the server log for what the SDK reported, then press RUN to test whether the fault has cleared.`
+    console.error(`[agents] CIRCUIT BREAKER — ${msg}`)
+    auditLog.record({
+      actor: 'system', origin: 'internal', action: 'agent.breaker.tripped',
+      resource: `agent:${rec.agent.id}`, summary: msg,
+      meta: { consecutiveTimeouts: h.consecutiveTimeouts }
+    })
+    // Onto the board, so it is visible where the desk's other bad news appears.
+    try {
+      office.postToActiveBoard(
+        { body: `⚠ CIRCUIT BREAKER — ${msg}`, authorId: managerFile.managerId() ?? 'operator', managerId: managerFile.managerId() },
+        this.roster().map((r) => r.id)
+      )
+    } catch (e) {
+      console.warn('[agents] breaker board post failed:', (e as Error).message)
+    }
+  }
+
+  /** Cleared the moment a run completes, so the next outage announces itself afresh. */
+  private clearBreaker(rec: AgentRecord): void {
+    if (rec.breakerAnnouncedAt) delete rec.breakerAnnouncedAt
   }
 
   private nextRunAt(rec: AgentRecord): number | null {
@@ -672,6 +744,9 @@ class AgentFleet {
       drawdownPct: clamp(input.drawdownPct ?? AGENT_DEFAULTS.drawdownPct, 1, 90),
       cooldownMinutes: clamp(input.cooldownMinutes ?? AGENT_DEFAULTS.cooldownMinutes, 1, 24 * 60),
       idleStanddownMinutes: clamp(input.idleStanddownMinutes ?? AGENT_DEFAULTS.idleStanddownMinutes, 0, 24 * 60),
+      // Validated rather than trusted: a malformed gate would otherwise sit in the record
+      // and be silently ignored at wake time, which reads exactly like a gate that passed.
+      ...(isAgentWakeGate(input.wakeGate) ? { wakeGate: input.wakeGate } : {}),
       createdAt: now,
       updatedAt: now
     }
@@ -713,6 +788,10 @@ class AgentFleet {
     if (typeof patch.drawdownPct === 'number') a.drawdownPct = clamp(patch.drawdownPct, 1, 90)
     if (typeof patch.cooldownMinutes === 'number') a.cooldownMinutes = clamp(patch.cooldownMinutes, 1, 24 * 60)
     if (typeof patch.idleStanddownMinutes === 'number') a.idleStanddownMinutes = clamp(patch.idleStanddownMinutes, 0, 24 * 60)
+    // null clears the gate; a valid gate sets it; anything else is left untouched rather
+    // than silently dropping a gate the caller meant to keep.
+    if (patch.wakeGate === null) delete a.wakeGate
+    else if (isAgentWakeGate(patch.wakeGate)) a.wakeGate = patch.wakeGate
     a.updatedAt = Date.now()
     this.save()
     const changed = (Object.keys(a) as (keyof typeof a)[])
@@ -958,12 +1037,152 @@ class AgentFleet {
     return this.running.has(id)
   }
 
+  // ── Answering a colleague while they are still working ───────────────────
+  //
+  // A blocking question used to park the asker until the answerer happened to wake on its
+  // own interval — an hour on this desk, and during the 08-18 timeout streak, never. The
+  // asker's correct behaviour was to stand down and report that it was waiting, so one
+  // question between two agents cost two runs and a cycle of market time.
+  //
+  // Now the question wakes the answerer immediately, ahead of the concurrency cap, to
+  // answer that one thing and stop. The asker polls its own blocker for a few seconds and
+  // carries on with the answer in hand, so runs end with an empty inbox.
+  //
+  // The cap is bypassed deliberately and narrowly. An inline answer is not new work
+  // competing for the desk's attention; it is a sub-step of the run already holding the
+  // slot, and making it queue behind that run would deadlock on it. canAnswerInline()
+  // holds the bounds that keep this from becoming a fleet-wide wake storm.
+
+  /** Agents currently awake purely to answer someone, and the chain that woke each. */
+  private inlineChains = new Map<string, string[]>()
+
+  /**
+   * Inline answers in flight at once, across the whole desk.
+   *
+   * canAnswerInline bounds DEPTH — A asks B asks C stops at MAX_INLINE_DEPTH. It cannot
+   * bound BREADTH, because each question is a separate call that knows nothing about the
+   * others: one agent raising three blockers in a run would open three sessions, each one
+   * bypassing the concurrency cap. These are bypassPermissions sessions with real trade
+   * authority, and MAX_CONCURRENT_RUNS exists precisely so there is never more than one
+   * of those at a time. One inline answer is the exception; a fleet of them is the bug
+   * that exception would otherwise create.
+   */
+  private static readonly MAX_CONCURRENT_INLINE = 1
+
+  /**
+   * Wakes `askedOf` to answer `blockerId` now, if that is safe. Returns what happened so
+   * the raise route can tell the asker whether to wait for an answer or file and move on.
+   */
+  dispatchInlineAnswer(input: { blockerId: string; askedBy: string; askedOf: string; question: string }): { ok: boolean; reason: string } {
+    const target = this.records.get(input.askedOf)
+    const chain = nextChain(this.inlineChains.get(input.askedBy) ?? [input.askedBy], input.askedBy)
+    const verdict = canAnswerInline({
+      askedBy: input.askedBy,
+      askedOf: input.askedOf,
+      chain,
+      knownAgents: [...this.records.keys()],
+      benched: target ? office.isBenched(input.askedOf).benched : false,
+      ...(target ? { enabled: target.agent.enabled } : {})
+    })
+    if (!verdict.ok) return { ok: false, reason: verdict.reason }
+    if (!target) return { ok: false, reason: `unknown agent '${input.askedOf}'` }
+    if (this.inlineChains.size >= AgentFleet.MAX_CONCURRENT_INLINE) {
+      return { ok: false, reason: 'the desk is already answering another question in flight — this one is filed and will be picked up next run' }
+    }
+    if (this.running.has(input.askedOf)) {
+      // Already awake: it will see the question in its own prompt on the way past. Waking
+      // it twice would give the same agent two live sessions.
+      return { ok: false, reason: `@${input.askedOf} is already running — the question is on their file` }
+    }
+
+    this.inlineChains.set(input.askedOf, nextChain(chain, input.askedOf))
+    const r = this.start(input.askedOf, 'inline-answer')
+    if (!r.ok) {
+      this.inlineChains.delete(input.askedOf)
+      return { ok: false, reason: r.error ?? 'could not start' }
+    }
+    console.log(`[agents] ${input.askedOf} woken inline to answer ${input.askedBy}`)
+    return { ok: true, reason: `@${input.askedOf} was woken to answer this now — poll the blocker for a few seconds before giving up on it` }
+  }
+
+  // ── The wake gate ────────────────────────────────────────────────────────
+  //
+  // The Trap Scout woke hourly for thirty consecutive cycles to call one screener, read
+  // "74 universe, 0 passing", and post an empty JSON block — roughly a quarter of a
+  // million tokens each time to discover that the market had not moved. The screener was
+  // the entire decision; the session existed to read its output aloud.
+  //
+  // So the fleet runs the screener itself first — a Python spawn, seconds and no
+  // allowance — and only spends a session when there is something to reason about. The
+  // skipped run is still recorded, because "we checked and there was nothing" is a fact
+  // the operator should be able to see, and it still advances the interval clock.
+
+  private async probeWakeGate(gate: AgentWakeGate): Promise<GateProbe> {
+    try {
+      const screener = screenerStore.get(gate.screenerId)
+      if (!screener) return { error: `no screener named '${gate.screenerId}'` }
+      const outcome = await runScreenerEngine(buildScreenerJob(
+        screener,
+        screenerInputsFromSnapshot(
+          cryptoHub.getSnapshot(),
+          (symbol, tf) => cryptoHub.getCandles(symbol, tf as Parameters<typeof cryptoHub.getCandles>[1]),
+          cryptoHub.getMarketCaps(),
+          cryptoHub.getCmcVolumes(),
+        ),
+        Date.now(),
+      ))
+      if (!outcome.ok || !outcome.result) return { error: outcome.error || 'screener returned no result' }
+      return { passing: outcome.result.passing }
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) }
+    }
+  }
+
+  /**
+   * Finalizes a run that never launched a session.
+   *
+   * Consecutive skips collapse into a single log entry. A gated agent skips most of its
+   * wakes by design — that is the saving — so recording each one would push every real
+   * run off the 25-entry log inside a day, and the gate would end up hiding exactly the
+   * activity the log exists to show.
+   */
+  private finishSkipped(rec: AgentRecord, run: AgentRun, reason: string): void {
+    const now = Date.now()
+    const previous = rec.runs[1]
+    if (previous?.state === 'skipped' && rec.runs[0] === run) {
+      rec.runs.shift()                                   // drop this entry...
+      previous.skipCount = (previous.skipCount ?? 1) + 1  // ...and fold it into the last
+      previous.endedAt = now
+      previous.summary = `${previous.skipCount} consecutive wake gate skips — most recently: ${reason}`
+      this.running.delete(rec.agent.id)
+      this.trackRun(rec, previous)
+      this.save()
+      return
+    }
+    run.state = 'skipped'
+    run.skipCount = 1
+    run.activity = 'Idle.'
+    run.summary = reason
+    run.endedAt = now
+    this.running.delete(rec.agent.id)
+    this.trackRun(rec, run)
+    office.think(rec.agent.id, { kind: 'observation', text: `Wake skipped — ${reason}`, runId: run.id })
+    console.log(`[agents] ${rec.agent.id} wake skipped — ${reason}`)
+    this.save()
+  }
+
   /** Kicks off a run in the background. Returns the run, or null if it could not start. */
   start(id: string, trigger: AgentRunTrigger = 'manual'): { ok: boolean; error?: string; run?: AgentRun } {
     const rec = this.records.get(id)
     if (!rec) return { ok: false, error: 'unknown agent' }
     if (this.running.has(id)) return { ok: false, error: 'this agent is already running' }
-    if (this.running.size >= MAX_CONCURRENT_RUNS) return { ok: false, error: 'another agent is running — try again shortly' }
+    // An inline answer bypasses the cap on purpose: it is a sub-step of the run that
+    // already holds the slot, and queueing it behind that run would deadlock on it. The
+    // bounds that keep this safe (depth, cycle-breaking, one wake per agent) live in
+    // canAnswerInline, which dispatchInlineAnswer has already applied by this point.
+    if (trigger !== 'inline-answer' && this.running.size >= MAX_CONCURRENT_RUNS) {
+      return { ok: false, error: 'another agent is running — try again shortly' }
+    }
     // Employment status is an HR-side bar on working at all, independent of the autonomy
     // dial: a suspended employee is still on the books but does not run.
     const bench = office.isBenched(id)
@@ -999,10 +1218,52 @@ class AgentFleet {
     // interval- and event-triggered runs have no HTTP request behind them, and
     // without this everything they touch downstream would be filed as 'system'.
     this.trackRun(rec, run)
-    void withActor(`agent:${id}`, () => this.execute(rec, run))
+    const gate = rec.agent.wakeGate
+    void withActor(`agent:${id}`, async () => {
+      // Checked here rather than in tick() so the slot and the run record are already
+      // reserved: two ticks cannot race into the same gate probe, and a skip is a
+      // first-class entry in the run log rather than an invisible non-event.
+      if (gate && isAgentWakeGate(gate) && gateAppliesTo(trigger)) {
+        run.activity = `Checking wake gate '${gate.screenerId}'…`
+        const verdict = gateVerdict(gate, await this.probeWakeGate(gate))
+        if (!verdict.allow) return this.finishSkipped(rec, run, verdict.reason)
+      }
+      return this.execute(rec, run)
+    })
     return { ok: true, run }
   }
 
+
+  /**
+   * The desk manager announces this run on the active board, opening a fresh board if the
+   * current one has rolled. Returns the board's thread id so the run's prompt can point
+   * the agent at it.
+   *
+   * Never fatal: an agent that cannot be announced still runs. The board is where the desk
+   * talks to itself, not a precondition for working.
+   */
+  private announceRun(rec: AgentRecord, run: AgentRun): string | null {
+    try {
+      const managerId = managerFile.managerId()
+      const ids = this.roster().map((r) => r.id)
+      const board = office.ensureActiveBoard(managerId, ids, run.startedAt)
+      // Housekeeping wakes are not desk news; announcing every standdown would bury the
+      // board under its own bookkeeping.
+      if (run.trigger !== 'standdown') {
+        office.reply(board.id, {
+          authorId: managerId ?? 'operator',
+          body: runAnnouncement({
+            agentId: rec.agent.id, agentName: rec.agent.name,
+            trigger: run.trigger, runId: run.id, at: run.startedAt
+          })
+        }, ids)
+      }
+      return board.id
+    } catch (e) {
+      console.warn('[agents] run announcement failed:', (e as Error).message)
+      return null
+    }
+  }
 
   /** Mirrors a run into the durable timeline table. Fire-and-forget. */
   private trackRun(rec: AgentRecord, run: AgentRun): void {
@@ -1044,10 +1305,12 @@ class AgentFleet {
       console.error(`[agents] ${agent.id} run timed out after ${RUN_TIMEOUT_MS / 60_000} min — session aborted`)
       run.state = 'error'
       run.error = 'Run timed out.'
+      run.timedOut = true
       run.activity = 'Timed out.'
       run.endedAt = Date.now()
       this.running.delete(agent.id)
       this.trackRun(rec, run)
+      this.noteTimeout(rec)
       this.save()
     }, RUN_TIMEOUT_MS)
 
@@ -1064,7 +1327,18 @@ class AgentFleet {
             : run.trigger === 'answer' ? 'A question you were blocked on has been answered.'
               : run.trigger === 'assignment' ? 'The desk manager has assigned you work off the Manager\'s File.'
                 : run.trigger === 'mention' ? "New questions have landed on the Manager's File. Triage them."
-                  : `Portfolio event: ${run.trigger}.`
+                  : run.trigger === 'inline-answer'
+                    ? [
+                      'A COLLEAGUE IS MID-RUN AND BLOCKED ON YOU. They are waiting on your answer right now,',
+                      'not on your next shift. Answer the open question(s) below addressed to you, then STOP.',
+                      '',
+                      'This run is for answering only. Do not scan, do not stage, do not tend positions, do not',
+                      'post a cycle report — whatever your mandate says you normally do, this is not that run.',
+                      'Answer from what you already know if you can; pull at most one narrow endpoint if you',
+                      'genuinely cannot. Speed is the point: every second you spend is a second a colleague is',
+                      'stalled. An honest "no" or "I do not know, here is who would" is a complete answer.'
+                    ].join('\n')
+                    : `Portfolio event: ${run.trigger}.`
 
       // An answer is handed over in the prompt, then marked delivered — so one answer
       // wakes the agent exactly once, however many ticks pass afterwards.
@@ -1097,7 +1371,24 @@ class AgentFleet {
         }
       }
 
-      const prompt = `${trigger} Assess the portfolio against your mandate and act.${answerBlock}${assignedBlock}
+      // The manager announces the run on the desk board, and the agent is told which
+      // thread that is. Two problems go away at once: colleagues stop opening a thread
+      // each (61 Scout threads in four days, nearly all of them empty), and "which thread
+      // is the current one" stops being a judgement call any agent can get wrong.
+      const boardId = this.announceRun(rec, run)
+
+      // THE SERVER CLOCK, stated once, in UTC. Agents were writing their own idea of the
+      // time into thread titles and post bodies — one run at 15:47 titled its cycle 23:11
+      // — and the downstream stage then burned turns every run trying to reconcile a
+      // hallucinated timestamp against the real one.
+      const nowIso = new Date().toISOString()
+
+      const prompt = `${trigger} Assess the portfolio against your mandate and act.
+
+CURRENT TIME (server clock, authoritative): ${nowIso}
+Use this for every timestamp you write. Do not estimate the time, and do not infer it
+from anything you read — a timestamp you compute yourself is the one that will be wrong.
+${boardId ? `\nACTIVE DESK BOARD: thread ${boardId}\nPost your cycle output as a REPLY to that thread:\n  curl -s -X POST "${this.apiBase}/api/crypto/office/board/${boardId}/reply?token=${this.token}" \\\n    -H 'Content-Type: application/json' -H 'x-homunculus-actor: agent:${agent.id}' \\\n    -d '{"authorId":"${agent.id}","body":"..."}'\nDo not open a new thread. The server refuses that for everyone but the desk manager.\n` : ''}${answerBlock}${assignedBlock}
 
 ${marketContext(snap)}`
 
@@ -1133,17 +1424,41 @@ ${marketContext(snap)}`
         if (text) office.think(agent.id, { kind: 'reasoning', text: text.slice(0, 2000), runId: run.id })
       }
 
+      // Accumulated across the input_json_delta fragments of one tool_use block, then
+      // narrated at content_block_stop when the arguments are finally complete.
+      let toolName = ''
+      let toolJson = ''
+      const flushTool = (): void => {
+        if (!toolName) return
+        const name = toolName
+        const raw = toolJson
+        toolName = ''
+        toolJson = ''
+        let parsed: unknown = null
+        try { parsed = raw ? JSON.parse(raw) : null } catch { parsed = null }
+        const n = narrateTool(name, parsed)
+        run.activity = n.activity
+        office.think(agent.id, { kind: 'action', text: n.detail, runId: run.id })
+      }
+
       for await (const message of response) {
         if (message.type === 'stream_event') {
           const ev = message.event as {
             type: string
             content_block?: { type?: string; name?: string }
-            delta?: { type?: string; text?: string }
+            delta?: { type?: string; text?: string; partial_json?: string }
           }
           if (ev.type === 'content_block_start' && ev.content_block?.type === 'tool_use' && ev.content_block.name) {
             flush()
-            run.activity = `Running ${ev.content_block.name}…`
-            office.think(agent.id, { kind: 'action', text: `Used ${ev.content_block.name}`, runId: run.id })
+            // The arguments arrive as input_json_delta fragments AFTER this event, so the
+            // narration is deferred to content_block_stop. Recording "Used Bash" here was
+            // the old behaviour, and since these agents do everything through curl it
+            // described essentially every action they take and explained none of them.
+            toolName = ev.content_block.name
+            toolJson = ''
+            run.activity = `Running ${toolName}…`
+          } else if (ev.type === 'content_block_delta' && ev.delta?.type === 'input_json_delta' && typeof ev.delta.partial_json === 'string') {
+            if (toolName) toolJson += ev.delta.partial_json
           } else if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta' && ev.delta.text) {
             tail += ev.delta.text
             block += ev.delta.text
@@ -1151,6 +1466,7 @@ ${marketContext(snap)}`
             if (line) run.activity = line.slice(0, 160)
           } else if (ev.type === 'content_block_stop') {
             flush()
+            flushTool()
           }
         } else if (message.type === 'assistant') {
           trackAssistant(usage, message)
@@ -1182,15 +1498,19 @@ ${marketContext(snap)}`
       if (timedOut) {
         run.state = 'error'
         run.error = 'Run timed out.'
+        run.timedOut = true
         run.activity = 'Timed out.'
         run.summary = tail.trim().slice(-4000)
         run.endedAt = Date.now()
+        this.noteTimeout(rec)
         return
       }
       run.state = 'done'
       run.summary = tail.trim().slice(-4000)
       run.activity = 'Idle.'
       run.endedAt = Date.now()
+      // A run that completed is the evidence the breaker was waiting for.
+      this.clearBreaker(rec)
       const acted = run.decisions.filter((d) => d.outcome !== 'refused').length
       console.log(`[agents] ${agent.id} run complete — ${acted} trade(s) actioned`)
     } catch (err) {
@@ -1230,6 +1550,9 @@ ${marketContext(snap)}`
       clearTimeout(timeout)
       this.trackRun(rec, run)
       this.running.delete(agent.id)
+      // The cascade this agent belonged to ends with its run, whatever the outcome —
+      // leaving the chain behind would bar it from a later, unrelated inline answer.
+      this.inlineChains.delete(agent.id)
       // Folded here rather than on success, so a run that errored halfway still counts
       // what it burned. A run that never reached the model (bad credentials) has nothing
       // to add and would only inflate the run count.
@@ -1424,6 +1747,12 @@ ${marketContext(snap)}`
     // is waiting on the other end of it — but bounded twice over: an agent may hold only
     // MAX_ASSIGNED_PER_AGENT open items, and each assignment is delivered exactly once.
     if (managerFile.pendingFor(a.id).length > 0) return 'assignment'
+
+    // THE CIRCUIT BREAKER. Runs that keep dying at the deadline get exponentially longer
+    // hold-offs. Checked after 'answer' and 'assignment' deliberately: those are somebody
+    // else waiting on this agent, and a colleague's question deserves an attempt even from
+    // an agent whose scheduled runs are misbehaving. Manual RUN never reaches here at all.
+    if (this.health(rec, ctx.now).suppressed) return null
 
     // Cooldown applies across every automatic trigger, so an event storm and an
     // interval cannot compound into back-to-back runs.

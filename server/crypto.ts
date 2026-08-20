@@ -24,6 +24,7 @@ import { stateStore } from './stateStore'
 import { auditLog } from './auditLog'
 import { fetchCmcVolumes, cmcConfigured, type CmcVolumeRead } from './cmc'
 import { AGENT_MAX_USD_CEILING, isAgentStrategyId } from '../shared/agents'
+import { shouldArmTrail } from '../shared/trailArm'
 
 /** Fire a CRYPTO toast + archive record for a trade lifecycle event. Kept out of
  *  the ComputerCore conversation (chatLog:false) so fills don't spam the chat. */
@@ -5193,6 +5194,20 @@ class AutoPlanner {
         st.note = `Final-target limit resting @ $${ask} for ${position.toFixed(6)} ${base}`
         this.persistBracket(e.status.id, step); this.notify()
         continue
+      }
+
+      // ── Arm the trail, once the position has run far enough ──
+      // Formerly the Trap Steward's job on a 30-minute LLM interval, which meant the one
+      // time-sensitive risk action on the desk was also the least reliable thing on it.
+      // The threshold is fixed arithmetic, so the engine owns it now and evaluates it on
+      // the same 20s tick that already runs the ratchet below.
+      const armAt = shouldArmTrail(spec, st)
+      if (armAt !== null) {
+        spec.trailPct = armAt
+        const floor = (st.highWater ?? 0) * (1 - armAt)
+        this.log(e, `  🔒 Trail armed at ${(armAt * 100).toFixed(2)}% — HWM $${st.highWater?.toFixed(6)} reached +${((spec.trailArm!.atPct) * 100).toFixed(1)}%, stop floor now $${floor.toFixed(6)}`)
+        st.note = `Trail armed at ${(armAt * 100).toFixed(2)}% (HWM +${((spec.trailArm!.atPct) * 100).toFixed(1)}%)`
+        this.persistBracket(e.status.id, step); this.notify()
       }
 
       // ── Trailing stop (ratchet up only) ──

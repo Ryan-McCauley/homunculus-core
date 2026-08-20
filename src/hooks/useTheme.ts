@@ -10,7 +10,6 @@ export interface Theme {
 
 export const THEMES: Theme[] = [
   { id: 'matrix', label: 'MATRIX', icon: '◈' },
-  { id: 'occult', label: 'OCCULT', icon: '⛧' },
   { id: 'prism', label: 'PRISM', icon: '◇' },
 ]
 

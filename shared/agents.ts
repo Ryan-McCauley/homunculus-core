@@ -10,6 +10,8 @@
 // ask for whatever it likes; it still cannot exceed what the dial allows.
 
 import type { Blocker } from './blockers'
+import type { AgentWakeGate } from './agentGate'
+import type { AgentHealth } from './agentHealth'
 
 /** What an enabled agent is permitted to do with a trade idea. */
 export type AgentAutonomy =
@@ -95,6 +97,10 @@ export interface CryptoAgent {
   /** Minimum minutes between automatic runs, whatever the trigger. Stops an event storm
    *  from spawning a run per tick. Manual RUN ignores it. */
   cooldownMinutes: number
+  /** Cheap, deterministic precondition checked BEFORE an interval wake spends a Claude
+   *  session. When it says there is nothing to work on, the run is recorded as 'skipped'
+   *  and no session is launched. Absent = every interval wake runs, as before. */
+  wakeGate?: AgentWakeGate
   /** Minutes of inactivity after which the agent stands down: it writes a handoff note
    *  to its journal and its resumed chat session is released, so an idle employee is not
    *  holding a large context open. 0 = never stand down. */
@@ -192,6 +198,7 @@ export type AgentRunTrigger =
   | 'answer'      // someone answered a question this agent was blocked on
   | 'assignment'  // the desk manager dispatched work off the Manager's File
   | 'standdown'   // going idle: write a handoff, then release the session
+  | 'inline-answer' // a colleague is mid-run and blocked on this agent: answer, now
   | AgentEvent
 
 export const AGENT_TRIGGER_LABELS: Record<string, string> = {
@@ -200,7 +207,8 @@ export const AGENT_TRIGGER_LABELS: Record<string, string> = {
   alert: 'alert',
   answer: 'answered',
   assignment: 'assigned',
-  standdown: 'standdown'
+  standdown: 'standdown',
+  'inline-answer': 'answering'
 }
 
 export interface AgentRun {
@@ -209,7 +217,18 @@ export interface AgentRun {
   trigger: AgentRunTrigger
   startedAt: number
   endedAt: number | null
-  state: 'running' | 'done' | 'error'
+  /** 'skipped' = the wake gate said there was nothing to do, so no session was ever
+   *  launched. Distinct from 'done' because it spent nothing and decided nothing. */
+  state: 'running' | 'done' | 'error' | 'skipped'
+  /** True when the run was killed at the deadline rather than failing on its own. The
+   *  circuit breaker keys off this flag, not off the error text — rewording the message
+   *  must not be able to disable a risk control. */
+  timedOut?: boolean
+  /** Consecutive gate skips this entry stands for. A skip is the ABSENCE of a run, and on
+   *  a gated agent most wakes are skips — logging each one separately would push every
+   *  real run off the 25-entry log within a day, so they collapse into one entry that
+   *  counts them. Only set on 'skipped' runs. */
+  skipCount?: number
   /** Short live line: what the run is doing right now. */
   activity: string
   /** The agent's closing summary, once it finishes. */
@@ -269,6 +288,10 @@ export interface AgentView {
   blockers: Blocker[]
   /** True once its resumed chat session has been released after going idle. */
   stoodDown: boolean
+  /** Timeout circuit breaker: how many runs in a row died at the deadline, whether
+   *  automatic wakes are currently held off, and whether that has gone on long enough
+   *  to be the operator's problem. */
+  health: AgentHealth
 }
 
 export interface NewAgentInput {
@@ -283,6 +306,7 @@ export interface NewAgentInput {
   drawdownPct?: number
   cooldownMinutes?: number
   idleStanddownMinutes?: number
+  wakeGate?: AgentWakeGate | null
 }
 
 export const AGENT_DEFAULTS = {

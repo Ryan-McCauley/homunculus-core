@@ -34,6 +34,11 @@ const cryptoMock = vi.hoisted(() => ({
   getSnapshot: vi.fn(),
   addPending: vi.fn(),
   executeTrade: vi.fn(),
+  // Read by the wake gate when it builds the screener job. Without these the probe throws
+  // and the gate fails open — which is the right production behaviour and a useless test.
+  getCandles: vi.fn(() => []),
+  getMarketCaps: vi.fn(() => ({})),
+  getCmcVolumes: vi.fn(() => ({})),
 }))
 vi.mock('./crypto', () => ({ cryptoHub: cryptoMock }))
 
@@ -47,10 +52,28 @@ const officeMock = vi.hoisted(() => ({
   inbox: vi.fn(() => [] as unknown[]),
   readJournal: vi.fn(() => [] as unknown[]),
   think: vi.fn(),
-  isBenched: vi.fn(() => ({ benched: false, status: null as string | null })),
+  isBenched: vi.fn((_id: string) => ({ benched: false, status: null as string | null })),
   offboard: vi.fn(),
+  ensureActiveBoard: vi.fn((_managerId: string | null, _ids: string[], _now?: number) => ({ id: 'board-1', messages: [] as unknown[] })),
+  reply: vi.fn((_threadId: string, _input: { body: string; authorId: string }, _ids: string[]) => ({ id: 'board-1' })),
+  postToActiveBoard: vi.fn((_input: { body: string; authorId: string; managerId: string | null }, _ids: string[]) => ({ id: 'board-1' })),
 }))
 vi.mock('./office', () => ({ office: officeMock }))
+
+// The wake gate runs a saved screener before spending a session. Stubbed to a controllable
+// verdict — these tests are about whether the session is launched, not about the engine.
+const screenerMock = vi.hoisted(() => ({
+  get: vi.fn(() => ({ id: 'trapline' }) as unknown),
+  passing: 0,
+  outcome: null as null | { ok: boolean; result?: { passing: number }; error: string },
+}))
+vi.mock('./screenerStore', () => ({ screenerStore: { get: screenerMock.get } }))
+vi.mock('./screenerRunner', () => ({
+  buildScreenerJob: vi.fn(() => ({})),
+  screenerInputsFromSnapshot: vi.fn(() => ({})),
+  runScreenerEngine: vi.fn(async () =>
+    screenerMock.outcome ?? { ok: true, result: { passing: screenerMock.passing }, error: '' }),
+}))
 
 const libraryMock = vi.hoisted(() => ({ promptDigest: vi.fn(() => '') }))
 vi.mock('./library', () => ({ library: libraryMock }))
@@ -113,6 +136,11 @@ beforeEach(() => {
   officeMock.inbox.mockReturnValue([])
   officeMock.readJournal.mockReturnValue([])
   officeMock.isBenched.mockReturnValue({ benched: false, status: null })
+  officeMock.ensureActiveBoard.mockReturnValue({ id: 'board-1', messages: [] })
+  officeMock.reply.mockReturnValue({ id: 'board-1' })
+  screenerMock.get.mockReturnValue({ id: 'trapline' })
+  screenerMock.passing = 0
+  screenerMock.outcome = null
   blockersMock.openFor.mockReturnValue([])
   blockersMock.undelivered.mockReturnValue([])
   blockersMock.isBlocked.mockReturnValue(null)
@@ -301,6 +329,21 @@ describe('roster / mentionableIds', () => {
   })
 })
 
+/**
+ * Keys are not exposed through any view, so they are read off the persisted record the
+ * same way the prompt builder does. Located by shape rather than by store position: other
+ * modules (the screener store, for one) seed themselves into the same store at import, so
+ * "the first key" was never actually a promise the store made.
+ */
+function persistedAgents(): { agents: { agent: { id: string }; proposeKey: string }[] } {
+  for (const value of storeState.data.values()) {
+    if (value && typeof value === 'object' && Array.isArray((value as { agents?: unknown }).agents)) {
+      return value as { agents: { agent: { id: string }; proposeKey: string }[] }
+    }
+  }
+  throw new Error('no persisted agents record in the store')
+}
+
 describe('propose — trade authority gate', () => {
   const req = (over: Partial<{ symbol: string; side: 'buy' | 'sell'; amount: string; price: string; reason: string }> = {}) =>
     ({ symbol: 'ETHUSD', side: 'buy' as const, amount: '0.01', ...over })
@@ -318,9 +361,7 @@ describe('propose — trade authority gate', () => {
       agentFleet.create(newAgent({ name: 'Trader', autonomy: 'auto', maxUsd: 100 }))
       // Keys are not exposed through any view, so read them off the persisted record
       // the same way the prompt builder does.
-      const persisted = storeState.data.get([...storeState.data.keys()][0]!) as {
-        agents: { agent: { id: string }; proposeKey: string }[]
-      }
+      const persisted = persistedAgents()
       const keyOf = (id: string) => persisted.agents.find((a) => a.agent.id === id)!.proposeKey
 
       expect(agentFleet.verifyProposeKey('trader', keyOf('trader'))).toBe(true)
@@ -335,10 +376,7 @@ describe('propose — trade authority gate', () => {
     it('never exposes the key through a read route', async () => {
       const { agentFleet } = await freshFleet()
       agentFleet.create(newAgent({ name: 'Trader' }))
-      const persisted = storeState.data.get([...storeState.data.keys()][0]!) as {
-        agents: { proposeKey: string }[]
-      }
-      const key = persisted.agents[0]!.proposeKey
+      const key = persistedAgents().agents[0]!.proposeKey
       expect(key).toBeTruthy()
       expect(JSON.stringify(agentFleet.list())).not.toContain(key)
       expect(JSON.stringify(agentFleet.get('trader'))).not.toContain(key)
@@ -963,5 +1001,347 @@ describe('pure type guards', () => {
     const { isAgentEvent } = await freshFleet()
     for (const v of ['signal', 'fill', 'drawdown', 'proposal', 'mention']) expect(isAgentEvent(v)).toBe(true)
     expect(isAgentEvent('nope')).toBe(false)
+  })
+})
+
+// ── The four efficiency fixes ─────────────────────────────────────────────
+
+/** Drives one agent through `n` back-to-back run timeouts. Fake timers must be active. */
+async function timeOutRuns(fleet: { start: (id: string, t?: never) => unknown; isRunning: (id: string) => boolean }, id: string, n: number): Promise<void> {
+  for (let i = 0; i < n; i++) {
+    sdk.query.mockImplementation(() => hangingQuery())
+    fleet.start(id)
+    await vi.advanceTimersByTimeAsync(10 * 60_000 + 1)
+    expect(fleet.isRunning(id)).toBe(false)
+  }
+}
+
+describe('timeout circuit breaker', () => {
+  it('records a timeout as a timeout, not merely as an error', async () => {
+    vi.useFakeTimers()
+    try {
+      const { agentFleet } = await freshFleet()
+      agentFleet.create(newAgent({ name: 'Stuck' }))
+      await timeOutRuns(agentFleet as never, 'stuck', 1)
+      expect(agentFleet.get('stuck')!.status?.timedOut).toBe(true)
+    } finally { vi.useRealTimers() }
+  })
+
+  it('counts the streak and holds automatic wakes off while it backs off', async () => {
+    vi.useFakeTimers()
+    try {
+      const { agentFleet } = await freshFleet()
+      agentFleet.create(newAgent({ name: 'Stuck' }))
+      await timeOutRuns(agentFleet as never, 'stuck', 2)
+      const h = agentFleet.get('stuck')!.health
+      expect(h.consecutiveTimeouts).toBe(2)
+      expect(h.suppressed).toBe(true)
+    } finally { vi.useRealTimers() }
+  })
+
+  it('TRIPS after four in a row and says so on the board — the 08-18 overnight outage', async () => {
+    vi.useFakeTimers()
+    try {
+      const { agentFleet } = await freshFleet()
+      agentFleet.create(newAgent({ name: 'Stuck' }))
+      await timeOutRuns(agentFleet as never, 'stuck', 4)
+      expect(agentFleet.get('stuck')!.health.tripped).toBe(true)
+      const posted = officeMock.postToActiveBoard.mock.calls
+        .map((c) => String((c[0] as { body: string }).body))
+      expect(posted.some((b) => /CIRCUIT BREAKER/.test(b))).toBe(true)
+    } finally { vi.useRealTimers() }
+  })
+
+  it('announces the trip once, not on every subsequent timeout', async () => {
+    vi.useFakeTimers()
+    try {
+      const { agentFleet } = await freshFleet()
+      agentFleet.create(newAgent({ name: 'Stuck' }))
+      await timeOutRuns(agentFleet as never, 'stuck', 6)
+      const trips = officeMock.postToActiveBoard.mock.calls
+        .filter((c) => /CIRCUIT BREAKER/.test(String((c[0] as { body: string }).body)))
+      expect(trips).toHaveLength(1)
+    } finally { vi.useRealTimers() }
+  })
+
+  it('clears once a run finally completes, so recovery is automatic', async () => {
+    vi.useFakeTimers()
+    try {
+      const { agentFleet } = await freshFleet()
+      agentFleet.create(newAgent({ name: 'Stuck' }))
+      await timeOutRuns(agentFleet as never, 'stuck', 4)
+      sdk.query.mockImplementation(() => fakeQuery([successResult()]))
+      agentFleet.start('stuck')
+      await vi.waitFor(() => expect(agentFleet.isRunning('stuck')).toBe(false))
+      const h = agentFleet.get('stuck')!.health
+      expect(h.consecutiveTimeouts).toBe(0)
+      expect(h.suppressed).toBe(false)
+      expect(h.tripped).toBe(false)
+    } finally { vi.useRealTimers() }
+  })
+
+  it('never suppresses a manual run — that is how the operator tests the fault', async () => {
+    vi.useFakeTimers()
+    try {
+      const { agentFleet } = await freshFleet()
+      agentFleet.create(newAgent({ name: 'Stuck' }))
+      await timeOutRuns(agentFleet as never, 'stuck', 4)
+      sdk.query.mockImplementation(() => fakeQuery([successResult()]))
+      expect(agentFleet.start('stuck').ok).toBe(true)
+    } finally { vi.useRealTimers() }
+  })
+})
+
+describe('wake gate', () => {
+  const gated = (over: Partial<NewAgentInput> = {}) => newAgent({
+    name: 'Scout', enabled: true, intervalMinutes: 1, cooldownMinutes: 0,
+    wakeGate: { kind: 'screener', screenerId: 'trapline' }, ...over,
+  })
+
+  it('SKIPS the session entirely when the screener found nothing — the zero-candidate grind', async () => {
+    const { agentFleet } = await freshFleet()
+    agentFleet.create(gated())
+    screenerMock.passing = 0
+    agentFleet.start('scout', 'interval')
+    await vi.waitFor(() => expect(agentFleet.isRunning('scout')).toBe(false))
+    expect(agentFleet.get('scout')!.status?.state).toBe('skipped')
+    expect(sdk.query).not.toHaveBeenCalled()
+  })
+
+  it('spends nothing on a skip: no tokens, no cost', async () => {
+    const { agentFleet } = await freshFleet()
+    agentFleet.create(gated())
+    screenerMock.passing = 0
+    agentFleet.start('scout', 'interval')
+    await vi.waitFor(() => expect(agentFleet.isRunning('scout')).toBe(false))
+    expect(agentFleet.get('scout')!.status?.usage).toBeUndefined()
+  })
+
+  it('runs normally the moment the screener finds something', async () => {
+    const { agentFleet } = await freshFleet()
+    agentFleet.create(gated())
+    screenerMock.passing = 2
+    agentFleet.start('scout', 'interval')
+    await vi.waitFor(() => expect(agentFleet.isRunning('scout')).toBe(false))
+    expect(agentFleet.get('scout')!.status?.state).toBe('done')
+    expect(sdk.query).toHaveBeenCalled()
+  })
+
+  it('never gates a manual run — the operator asked', async () => {
+    const { agentFleet } = await freshFleet()
+    agentFleet.create(gated())
+    screenerMock.passing = 0
+    agentFleet.start('scout', 'manual')
+    await vi.waitFor(() => expect(agentFleet.isRunning('scout')).toBe(false))
+    expect(sdk.query).toHaveBeenCalled()
+  })
+
+  it('never gates a market event: the book moved, and the screener does not know that', async () => {
+    const { agentFleet } = await freshFleet()
+    agentFleet.create(gated())
+    screenerMock.passing = 0
+    agentFleet.start('scout', 'fill')
+    await vi.waitFor(() => expect(agentFleet.isRunning('scout')).toBe(false))
+    expect(sdk.query).toHaveBeenCalled()
+  })
+
+  it('FAILS OPEN when the screener is broken — a bad gate must not silence an agent', async () => {
+    const { agentFleet } = await freshFleet()
+    agentFleet.create(gated())
+    screenerMock.outcome = { ok: false, error: 'python not found' }
+    agentFleet.start('scout', 'interval')
+    await vi.waitFor(() => expect(agentFleet.isRunning('scout')).toBe(false))
+    expect(sdk.query).toHaveBeenCalled()
+  })
+
+  it('fails open when the screener has been deleted out from under the agent', async () => {
+    const { agentFleet } = await freshFleet()
+    agentFleet.create(gated())
+    screenerMock.get.mockReturnValue(undefined)
+    agentFleet.start('scout', 'interval')
+    await vi.waitFor(() => expect(agentFleet.isRunning('scout')).toBe(false))
+    expect(sdk.query).toHaveBeenCalled()
+  })
+
+  it('COLLAPSES consecutive skips instead of burying the run log under them', async () => {
+    // The run log keeps 25 entries and is how the operator sees a day of activity. Most
+    // hours legitimately have no candidates, so recording each skip separately would push
+    // every real run off the log within a day — the gate would hide the thing it protects.
+    const { agentFleet } = await freshFleet()
+    agentFleet.create(gated())
+    screenerMock.passing = 0
+    for (let i = 0; i < 5; i++) {
+      agentFleet.start('scout', 'interval')
+      await vi.waitFor(() => expect(agentFleet.isRunning('scout')).toBe(false))
+    }
+    const runs = agentFleet.get('scout')!.recentRuns
+    expect(runs).toHaveLength(1)
+    expect(runs[0]!.state).toBe('skipped')
+    expect(runs[0]!.skipCount).toBe(5)
+    expect(runs[0]!.summary).toMatch(/5/)
+  })
+
+  it('starts a new log entry once a real run has happened in between', async () => {
+    const { agentFleet } = await freshFleet()
+    agentFleet.create(gated())
+    screenerMock.passing = 0
+    agentFleet.start('scout', 'interval')
+    await vi.waitFor(() => expect(agentFleet.isRunning('scout')).toBe(false))
+    screenerMock.passing = 3
+    agentFleet.start('scout', 'interval')
+    await vi.waitFor(() => expect(agentFleet.isRunning('scout')).toBe(false))
+    screenerMock.passing = 0
+    agentFleet.start('scout', 'interval')
+    await vi.waitFor(() => expect(agentFleet.isRunning('scout')).toBe(false))
+    const runs = agentFleet.get('scout')!.recentRuns
+    expect(runs.map((r) => r.state)).toEqual(['skipped', 'done', 'skipped'])
+  })
+
+  it('leaves an ungated agent completely alone', async () => {
+    const { agentFleet } = await freshFleet()
+    agentFleet.create(newAgent({ name: 'Plain' }))
+    agentFleet.start('plain', 'interval')
+    await vi.waitFor(() => expect(agentFleet.isRunning('plain')).toBe(false))
+    expect(sdk.query).toHaveBeenCalled()
+  })
+})
+
+describe('inline answers', () => {
+  const ask = (over: Partial<{ blockerId: string; askedBy: string; askedOf: string; question: string }> = {}) => ({
+    blockerId: 'b1', askedBy: 'setter', askedOf: 'scout', question: 'Is the scan fresh?', ...over,
+  })
+
+  async function twoAgents() {
+    const { agentFleet } = await freshFleet()
+    agentFleet.create(newAgent({ name: 'Setter' }))
+    agentFleet.create(newAgent({ name: 'Scout' }))
+    return agentFleet
+  }
+
+  it('wakes the colleague immediately, even though another agent holds the only slot', async () => {
+    const agentFleet = await twoAgents()
+    sdk.query.mockImplementation(() => hangingQuery())
+    agentFleet.start('setter')                       // takes the single slot
+    expect(agentFleet.isRunning('setter')).toBe(true)
+    const r = agentFleet.dispatchInlineAnswer(ask())
+    expect(r.ok).toBe(true)
+    expect(agentFleet.isRunning('scout')).toBe(true) // ...and the answerer runs anyway
+  })
+
+  it('tells the answerer this run is for answering and nothing else', async () => {
+    const agentFleet = await twoAgents()
+    agentFleet.dispatchInlineAnswer(ask())
+    await vi.waitFor(() => expect(agentFleet.isRunning('scout')).toBe(false))
+    const prompt = String((sdk.query.mock.calls[0]![0] as { prompt: string }).prompt)
+    expect(prompt).toMatch(/BLOCKED ON YOU/)
+    expect(prompt).toMatch(/answering only/i)
+  })
+
+  it('refuses to wake the operator — a human answers on human time', async () => {
+    const agentFleet = await twoAgents()
+    const r = agentFleet.dispatchInlineAnswer(ask({ askedOf: 'operator' }))
+    expect(r.ok).toBe(false)
+    expect(r.reason).toMatch(/operator/i)
+  })
+
+  it('refuses an unknown answerer rather than spawning a run for a typo', async () => {
+    const agentFleet = await twoAgents()
+    expect(agentFleet.dispatchInlineAnswer(ask({ askedOf: 'scoot' })).ok).toBe(false)
+  })
+
+  it('BREAKS THE CYCLE: the agent that asked cannot be woken back by its own answerer', async () => {
+    const agentFleet = await twoAgents()
+    sdk.query.mockImplementation(() => hangingQuery())
+    expect(agentFleet.dispatchInlineAnswer(ask()).ok).toBe(true)
+    // Scout, now awake to answer Setter, asks Setter back. That must not re-enter Setter.
+    const back = agentFleet.dispatchInlineAnswer(ask({ askedBy: 'scout', askedOf: 'setter' }))
+    expect(back.ok).toBe(false)
+    expect(back.reason).toMatch(/circular|already/i)
+  })
+
+  it('does not wake an agent that is already running — it will see the question anyway', async () => {
+    const agentFleet = await twoAgents()
+    sdk.query.mockImplementation(() => hangingQuery())
+    agentFleet.start('scout')
+    const r = agentFleet.dispatchInlineAnswer(ask())
+    expect(r.ok).toBe(false)
+    expect(r.reason).toMatch(/already running/i)
+  })
+
+  it('refuses to wake a benched colleague', async () => {
+    const agentFleet = await twoAgents()
+    officeMock.isBenched.mockImplementation((id: string) => (
+      id === 'scout' ? { benched: true, status: 'suspended' } : { benched: false, status: null }
+    ))
+    expect(agentFleet.dispatchInlineAnswer(ask()).ok).toBe(false)
+  })
+
+  it('bounds BREADTH as well as depth — one asker cannot open a fleet of privileged sessions', async () => {
+    // Depth stops A->B->C->D. Nothing stopped A asking B, C and D at once, and each
+    // inline run bypasses the concurrency cap by design — so the bound has to be here.
+    const { agentFleet } = await freshFleet()
+    for (const n of ['Setter', 'Scout', 'Steward', 'Auditor']) agentFleet.create(newAgent({ name: n }))
+    sdk.query.mockImplementation(() => hangingQuery())
+    expect(agentFleet.dispatchInlineAnswer(ask({ askedOf: 'scout' })).ok).toBe(true)
+    const second = agentFleet.dispatchInlineAnswer(ask({ askedOf: 'steward' }))
+    expect(second.ok).toBe(false)
+    expect(second.reason).toMatch(/already answering|in flight/i)
+  })
+
+  it('releases the chain when the answering run ends, so the next question still works', async () => {
+    const agentFleet = await twoAgents()
+    expect(agentFleet.dispatchInlineAnswer(ask()).ok).toBe(true)
+    await vi.waitFor(() => expect(agentFleet.isRunning('scout')).toBe(false))
+    // A fresh, unrelated cascade in the other direction is fine once the run is over.
+    expect(agentFleet.dispatchInlineAnswer(ask({ askedBy: 'scout', askedOf: 'setter' })).ok).toBe(true)
+  })
+})
+
+describe('the active desk board', () => {
+  it('announces each run on the board instead of letting agents open their own threads', async () => {
+    const { agentFleet } = await freshFleet()
+    agentFleet.create(newAgent({ name: 'Scout' }))
+    agentFleet.start('scout', 'interval')
+    await vi.waitFor(() => expect(agentFleet.isRunning('scout')).toBe(false))
+    expect(officeMock.ensureActiveBoard).toHaveBeenCalled()
+    const body = String((officeMock.reply.mock.calls[0]![1] as { body: string }).body)
+    expect(body).toContain('Scout')
+    expect(body).toContain('interval')
+  })
+
+  it('points the agent at that thread, and tells it not to open one', async () => {
+    const { agentFleet } = await freshFleet()
+    agentFleet.create(newAgent({ name: 'Scout' }))
+    agentFleet.start('scout')
+    await vi.waitFor(() => expect(agentFleet.isRunning('scout')).toBe(false))
+    const prompt = String((sdk.query.mock.calls[0]![0] as { prompt: string }).prompt)
+    expect(prompt).toContain('board-1')
+    expect(prompt).toMatch(/Do not open a new thread/)
+  })
+
+  it('states the server clock in UTC — the timestamp agents kept hallucinating', async () => {
+    const { agentFleet } = await freshFleet()
+    agentFleet.create(newAgent({ name: 'Scout' }))
+    agentFleet.start('scout')
+    await vi.waitFor(() => expect(agentFleet.isRunning('scout')).toBe(false))
+    const prompt = String((sdk.query.mock.calls[0]![0] as { prompt: string }).prompt)
+    expect(prompt).toMatch(/CURRENT TIME \(server clock, authoritative\): \d{4}-\d{2}-\d{2}T/)
+  })
+
+  it('does not announce housekeeping — the board is not a log of its own bookkeeping', async () => {
+    const { agentFleet } = await freshFleet()
+    agentFleet.create(newAgent({ name: 'Scout' }))
+    agentFleet.start('scout', 'standdown' as never)
+    await vi.waitFor(() => expect(agentFleet.isRunning('scout')).toBe(false))
+    expect(officeMock.reply).not.toHaveBeenCalled()
+  })
+
+  it('still runs when the board is unavailable — the board is not a precondition for working', async () => {
+    const { agentFleet } = await freshFleet()
+    agentFleet.create(newAgent({ name: 'Scout' }))
+    officeMock.ensureActiveBoard.mockImplementation(() => { throw new Error('board on fire') })
+    agentFleet.start('scout')
+    await vi.waitFor(() => expect(agentFleet.isRunning('scout')).toBe(false))
+    expect(agentFleet.get('scout')!.status?.state).toBe('done')
   })
 })

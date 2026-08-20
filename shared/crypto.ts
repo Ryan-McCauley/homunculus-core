@@ -4,6 +4,8 @@
 // No keys are ever sent to the client. Trade execution happens server-side only.
 // All /api/crypto/* routes are token-gated for non-localhost callers.
 
+import type { TrailArm } from './trailArm'
+
 /** Trade data (Gemini fills + the app's own audit log) is only surfaced from this
  *  instant onward — older history is dropped so the CRYPTO tab shows the current
  *  year's activity only. Bump the year here to roll the window forward. */
@@ -172,6 +174,13 @@ export interface BracketSpec {
   tp1: { pricePct: number; sizeFraction: number }  // e.g. +0.012, sell 0.6 of the fill
   tp2?: { pricePct: number }     // remainder sells here; omit to sell all at tp1
   trailPct?: number              // ratchet the stop up to (high − trailPct); never down
+  /** Arms `trailPct` automatically once the high water mark reaches entry × (1 + atPct).
+   *  Replaces the Trap Steward's manual /bracket/adjust call — a fixed threshold that was
+   *  being evaluated by a Claude session on a 30-minute interval, and therefore missed
+   *  every time that session timed out. Arming only ever tightens risk (the stop moves
+   *  from −stopPct to just under the high water mark, which is above entry by then), so
+   *  the engine does it without confirmation. Ignored once trailPct is set. */
+  trailArm?: TrailArm
   breakEvenAfterTp1?: boolean    // move stop to entry once tp1 fills
   positionTimeStopMin: number    // FAST 90, SWING 1440 — auto-exit remainder to USD after this
   /** Stages the FULL/FINAL exit (final-target hit, position time-stop, or a tpFirst TP) as

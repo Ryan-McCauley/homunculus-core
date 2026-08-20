@@ -32,6 +32,7 @@ function view(over: Partial<AgentView> = {}): AgentView {
   return {
     agent: agent(), status: null, recentRuns: [], decisions: [], transcript: [],
     nextRunAt: null, chatUsage: null, totals: null, blockers: [], stoodDown: false,
+    health: { consecutiveTimeouts: 0, suppressedUntil: null, suppressed: false, tripped: false },
     ...over,
   }
 }

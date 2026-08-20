@@ -520,3 +520,71 @@ describe('type guards', () => {
     expect(mod.isSourceRef(null)).toBe(false)
   })
 })
+
+describe('the active desk board', () => {
+  const HOUR = 3_600_000
+
+  it('has no active board before anything has been posted', async () => {
+    const office = await freshOffice()
+    expect(office.activeBoard()).toBeNull()
+  })
+
+  it('opens one under the manager\'s name, tagged so it can be found again', async () => {
+    const office = await freshOffice()
+    const board = office.ensureActiveBoard('manager', [])
+    expect(board.authorId).toBe('manager')
+    expect(board.tags).toContain('desk-board')
+    expect(office.activeBoard()?.id).toBe(board.id)
+  })
+
+  it('returns the SAME board on every later call — one board, not one per run', async () => {
+    // The behaviour this replaces: 61 Scout threads in four days, nearly all empty.
+    const office = await freshOffice()
+    const first = office.ensureActiveBoard('manager', [])
+    for (let i = 0; i < 20; i++) office.reply(first.id, { body: `run ${i}`, authorId: 'trap-scout' }, [])
+    expect(office.ensureActiveBoard('manager', []).id).toBe(first.id)
+    expect(office.listThreads()).toHaveLength(1)
+  })
+
+  it('rolls to a fresh board on the next day', async () => {
+    const office = await freshOffice()
+    const first = office.ensureActiveBoard('manager', [], 0)
+    const next = office.ensureActiveBoard('manager', [], 25 * HOUR)
+    expect(next.id).not.toBe(first.id)
+  })
+
+  it('rolls once the board is too long to be worth reading', async () => {
+    const office = await freshOffice()
+    const first = office.ensureActiveBoard('manager', [])
+    for (let i = 0; i < 200; i++) office.reply(first.id, { body: `x${i}`, authorId: 'trap-scout' }, [])
+    expect(office.ensureActiveBoard('manager', []).id).not.toBe(first.id)
+  })
+
+  it('does not treat a resolved board as active', async () => {
+    const office = await freshOffice()
+    const first = office.ensureActiveBoard('manager', [])
+    office.setResolved(first.id, true)
+    expect(office.activeBoard()).toBeNull()
+  })
+
+  it('falls back to the operator when no manager has been appointed', async () => {
+    const office = await freshOffice()
+    expect(office.ensureActiveBoard(null, []).authorId).toBe('operator')
+  })
+
+  it('postToActiveBoard opens the board if it has to, then replies on it', async () => {
+    const office = await freshOffice()
+    const t = office.postToActiveBoard({ body: 'scan: 0 candidates', authorId: 'trap-scout', managerId: 'manager' }, [])
+    expect(t).not.toBeNull()
+    expect(t!.messages).toHaveLength(2)          // the board's opening note, then the reply
+    expect(t!.messages[1]!.authorId).toBe('trap-scout')
+  })
+
+  it('NEVER prunes the board the desk is posting to right now', async () => {
+    const office = await freshOffice()
+    const board = office.ensureActiveBoard('manager', [])
+    // Bury it under far more threads than the cap allows.
+    for (let i = 0; i < 260; i++) office.postThread({ title: `t${i}`, body: 'x', authorId: 'operator' }, [])
+    expect(office.getThread(board.id)).not.toBeNull()
+  })
+})

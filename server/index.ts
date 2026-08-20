@@ -33,6 +33,8 @@ import { office, isDepartment, isEmploymentStatus, isSourceRef } from './office'
 import { library } from './library'
 import { blockerBoard } from './blockers'
 import { managerFile } from './managerFile'
+import { agentMayOpenThread } from '../shared/activeBoard'
+import { newestStagePost } from '../shared/agentHandoff'
 import { isArtifactFormat, isArtifactKind, isArtifactOutcome } from '../shared/library'
 import { isBlockerSeverity } from '../shared/blockers'
 import { screenerStore, STRATEGY_PRESETS } from './screenerStore'
@@ -1352,12 +1354,58 @@ async function handleApi(
     return json(200, { ok: true, threads: office.listThreads() }), true
   }
 
+  // GET /api/crypto/office/board/active — the thread everyone is posting to right now,
+  // so an agent can find it without guessing at titles or sorting the board itself.
+  if (path === '/api/crypto/office/board/active' && req.method === 'GET') {
+    if (!requireToken(req, res)) return true
+    const thread = office.ensureActiveBoard(managerFile.managerId(), agentFleet.mentionableIds())
+    return json(200, { ok: true, thread }), true
+  }
+
+  // GET /api/crypto/office/board/stage?from=trap-scout&maxAgeMin=90
+  //
+  // The newest stage post a named upstream agent left on the active board. This is a
+  // pipeline handoff done mechanically rather than by judgement: the downstream stage used
+  // to be told to find "the newest thread tagged trapline-run", which selected by last
+  // activity and so returned a downstream tend report whenever one had landed more
+  // recently than the scan. The Setter then stood down reporting "no fresh scan" with a
+  // scan sitting right there. Author, freshness and payload are decided here, once.
+  if (path === '/api/crypto/office/board/stage' && req.method === 'GET') {
+    if (!requireToken(req, res)) return true
+    const from = String(url.searchParams.get('from') ?? '').trim()
+    if (!from) return json(400, { ok: false, error: 'from=<agentId> required' }), true
+    const maxAgeMin = Number(url.searchParams.get('maxAgeMin') ?? 90)
+    const thread = office.ensureActiveBoard(managerFile.managerId(), agentFleet.mentionableIds())
+    const post = newestStagePost(thread, {
+      authorId: from,
+      maxAgeMs: (Number.isFinite(maxAgeMin) && maxAgeMin > 0 ? maxAgeMin : 90) * 60_000,
+      now: Date.now()
+    })
+    return json(200, {
+      ok: true,
+      boardId: thread.id,
+      // null means no fresh post from that stage — stand down. A post with work 0 is
+      // present and empty, which is a different thing and must read differently.
+      post,
+      fresh: post !== null
+    }), true
+  }
+
   // POST /api/crypto/office/board  — open a thread { authorId, title, body, tags? }
   if (path === '/api/crypto/office/board' && req.method === 'POST') {
     if (!requireToken(req, res)) return true
     const body = await readBody(req)
     const authorId = String(body.authorId ?? 'operator')
     if (!String(body.body ?? '').trim()) return json(400, { ok: false, error: 'body required' }), true
+    // Colleagues reply on the active board; only the manager opens threads. Enforced here
+    // rather than asked for in the mandate, for the same reason the autonomy dial is: a
+    // rule an agent can forget is not a rule. Sixty-one near-empty Scout threads in four
+    // days is what the polite version produced.
+    const mayOpen = agentMayOpenThread(authorId, managerFile.managerId())
+    if (!mayOpen.ok) {
+      const active = office.ensureActiveBoard(managerFile.managerId(), agentFleet.mentionableIds())
+      return json(403, { ok: false, error: mayOpen.error, activeBoardId: active.id }), true
+    }
     const thread = office.postThread({
       title: String(body.title ?? ''),
       body: String(body.body),
@@ -1421,15 +1469,29 @@ async function handleApi(
       ...(typeof body.threadId === 'string' ? { threadId: body.threadId } : {})
     })
     if (!r.ok) return json(400, r), true
+    // Asking a colleague wakes them now, so the asker can wait a few seconds and finish
+    // its run with the answer rather than parking the question until their next shift.
+    // Only on a fresh ask: re-raising a duplicate must not re-wake anyone.
+    const inline = r.duplicate
+      ? { ok: false, reason: 'already asked — the original is still open' }
+      : agentFleet.dispatchInlineAnswer({
+        blockerId: r.blocker.id,
+        askedBy: r.blocker.agentId,
+        askedOf: r.blocker.askedOf,
+        question: r.blocker.question
+      })
     // A duplicate is answered with the original and said plainly, so an agent that asks
     // twice learns it already asked rather than believing it asked twice.
     return json(200, {
       ok: true,
       blocker: r.blocker,
       duplicate: r.duplicate,
-      ...(r.duplicate
-        ? { note: 'You already asked this and it is still open. Do not ask again — you will be woken when it is answered.' }
-        : {})
+      wokeAnswerer: inline.ok,
+      note: r.duplicate
+        ? 'You already asked this and it is still open. Do not ask again — you will be woken when it is answered.'
+        : inline.ok
+          ? `${inline.reason} Poll this blocker (every ~10s, up to ~2 min) and finish your run with the answer.`
+          : `Not answered inline: ${inline.reason}. You will be woken when it is answered.`
     }), true
   }
 
