@@ -8,7 +8,7 @@
 # sources, and production dependencies only.
 
 # ── Stage 1: build the web UI ────────────────────────────────────────────────
-FROM node:20-bookworm-slim AS build
+FROM node:22-bookworm-slim AS build
 
 WORKDIR /app
 
@@ -31,7 +31,7 @@ RUN npm run build:web
 RUN npm prune --omit=dev
 
 # ── Stage 2: runtime ─────────────────────────────────────────────────────────
-FROM node:20-bookworm-slim AS runtime
+FROM node:22-bookworm-slim AS runtime
 
 WORKDIR /app
 
@@ -56,7 +56,7 @@ RUN mkdir -p /app/data /app/private && chown -R node:node /app/data /app/private
 
 # The terminal channel hands out a shell inside this container. Root is not the user
 # that shell should be, and an RCE anywhere in the server should not land as root
-# either. node:20 ships an unprivileged `node` user for exactly this.
+# either. The official node images ship an unprivileged `node` user for exactly this.
 USER node
 
 EXPOSE 8787

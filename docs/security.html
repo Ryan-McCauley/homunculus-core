@@ -111,6 +111,7 @@ ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN</code></pre>
 <h3>1. The embedded terminal</h3>
 <p>The Terminal widget is a real PTY (<code>server/terminal.ts</code>, node-pty) running as the backend user. It is the single largest risk surface: anyone who reaches an authenticated session has shell access, and the shell can read <code>.env</code> — every credential the allowlist works to keep away from agent children.</p>
 <p>The backend takes one extra precaution here: <strong>the terminal channel re-checks the token even on a local socket.</strong> The upgrade handler waives the token for localhost, which is sensible for the dashboard itself but not for a channel that hands out a shell carrying the process environment. So opening a PTY always costs the real secret once one is configured, regardless of where the socket dialled in from.</p>
+<p>A connection may hold at most <strong>four live PTYs</strong> (<code>MAX_SESSIONS_PER_CONNECTION</code>). <code>term:start</code> is driven entirely by a client-chosen id, so without a ceiling one authorised socket could fork shells in a loop until the host ran out of process table. Four is far past what the UI can show and far below anything that hurts; closing the socket disposes them all.</p>
 <div class="callout danger"><span class="callout-title">Danger</span> In Docker the terminal is the container's shell, which bounds the blast radius. Running the backend natively on your desktop means the terminal is <em>your</em> shell with <em>your</em> permissions.</div>
 
 <h3>2. Trading credentials</h3>
@@ -121,6 +122,9 @@ ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN</code></pre>
 
 <h3>4. Prompt injection into agent sessions</h3>
 <p>Agent prompts include text written by other agents and live external data (market strings, home state, OSINT feeds). Content arriving through those channels is data, not instruction — but a model with Bash can be talked into treating it as instruction. The env allowlist is the mitigation that assumes this will sometimes fail.</p>
+
+<h3>5. Links and content the renderer did not author</h3>
+<p>The Electron shell opens <code>target="_blank"</code> links in the system browser rather than a child window, and hands only <code>http</code> and <code>https</code> URLs to the OS. <code>shell.openExternal</code> launches whatever handler the platform has registered for a scheme — <code>file://</code> opens a local path in the file manager, and a registered custom scheme starts another application with an argument the page chose. Since the renderer displays agent- and feed-authored text, a link is checked before it is acted on, the same way the rest of the app treats that text. In-page navigation away from the app's own origin is refused outright by the <code>will-navigate</code> handler, so a redirect cannot carry a window that still holds <code>window.homunculusVault</code> to another host.</p>
 
 <h2>Deployment posture</h2>
 <table>
@@ -142,6 +146,7 @@ ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN</code></pre>
 <li>Rotate <code>CLAUDE_CODE_OAUTH_TOKEN</code>, exchange keys, and <code>HA_TOKEN</code> if a client device is lost.</li>
 <li>Review <code>data/audit/*.jsonl</code> after any unexpected agent behaviour; it records regardless of whether the admin token is configured.</li>
 <li>Back up <code>data/</code> before upgrades — see <a href="upgrading.html">Upgrading</a>.</li>
+<li>Keep the sync <strong>AUDIT</strong> area switched off unless you have thought about it. It is off by default because the log is an append-only record of what happened on <em>this</em> node, and newest-wins would let one node's copy shadow another's.</li>
 </ul>
 
 </main>

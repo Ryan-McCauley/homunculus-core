@@ -29,10 +29,10 @@ export default defineConfig({
       // numbers so the suite fails the moment coverage regresses, and get
       // raised as gaps close — never lowered to make a red run green.
       thresholds: {
-        lines: 33.5,
-        functions: 29,
-        branches: 23.5,
-        statements: 32.4
+        lines: 35.3,
+        functions: 30.4,
+        branches: 25.2,
+        statements: 33.9
       }
     }
   }

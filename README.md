@@ -66,7 +66,7 @@ CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
 
 ## Run it
 
-**Requirements:** Node 20 LTS (`nvm use` — see `.nvmrc`). No Xcode/native-build dance
+**Requirements:** Node 22 LTS (`nvm use` — see `.nvmrc`). No Xcode/native-build dance
 needed anymore: `node-pty` runs under Node with prebuilt binaries.
 
 ### Desktop (Electron + backend, hot reload)

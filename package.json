@@ -7,6 +7,9 @@
   "private": true,
   "main": "out/main/index.js",
   "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
     "dev": "concurrently -k -n server,app -c green,cyan \"npm:dev:server\" \"npm:dev:app\"",
     "dev:server": "tsx watch server/index.ts",
@@ -51,7 +54,7 @@
     "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
-    "@types/node": "^20.14.0",
+    "@types/node": "^22.20.1",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@types/three": "^0.185.0",
