@@ -21,6 +21,7 @@ import { broadcastProactive } from './chat'
 import { strategyRunner, getEnabledStrategy, isStrategyId, type StrategyId } from './strategyRunner'
 import { alertStore } from './cryptoAlerts'
 import { stateStore } from './stateStore'
+import { decimalsForIncrement, decimalsOf, floorToDecimals, roundToDecimals } from './orderMath'
 import { auditLog } from './auditLog'
 import { fetchCmcVolumes, cmcConfigured, type CmcVolumeRead } from './cmc'
 import { AGENT_MAX_USD_CEILING, isAgentStrategyId } from '../shared/agents'
@@ -244,12 +245,12 @@ async function fetchTickSize(symbol: string): Promise<number> {
   return ts
 }
 
-// Truncate (floor) amount to the symbol's allowed decimal precision
+// Truncate (floor) amount to the symbol's allowed decimal precision. The
+// arithmetic — and the reasoning for why amounts floor while prices round — is in
+// server/orderMath.ts, where it is unit-tested; this half only supplies the
+// symbol's tick size.
 async function floorToTickSize(amount: number, symbol: string): Promise<string> {
-  const ts = await fetchTickSize(symbol)
-  const decimals = Math.round(-Math.log10(ts))
-  const factor = Math.pow(10, decimals)
-  return (Math.floor(amount * factor) / factor).toFixed(decimals)
+  return floorToDecimals(amount, decimalsForIncrement(await fetchTickSize(symbol)))
 }
 
 // Gemini rejects prices that don't conform to the symbol's quote increment.
@@ -269,10 +270,7 @@ async function fetchQuoteIncrement(symbol: string): Promise<number> {
 
 /** Round a computed price to the symbol's quote increment so the order is accepted. */
 async function roundToQuoteIncrement(price: number, symbol: string): Promise<string> {
-  const qi = await fetchQuoteIncrement(symbol)
-  const decimals = Math.max(0, Math.round(-Math.log10(qi)))
-  const factor = Math.pow(10, decimals)
-  return (Math.round(price * factor) / factor).toFixed(decimals)
+  return roundToDecimals(price, decimalsForIncrement(await fetchQuoteIncrement(symbol)))
 }
 
 async function fetchHoldings(): Promise<Holding[]> {
@@ -400,9 +398,14 @@ async function placeOrder(
     // — the caller's reconcile logic (idempotent entries) is unaffected since this path
     // is for exits/manual sells, never bracket entries with a clientOrderId collision risk.
     if (res.status === 400 && body.includes('InvalidQuantity') && !clientOrderId) {
-      const startDecimals = (payload['amount'] as string).split('.')[1]?.length ?? 0
+      const startDecimals = decimalsOf(payload['amount'] as string)
       for (let d = startDecimals - 1; d >= 0 && !res.ok; d--) {
-        const retryAmount = Number(safeAmount).toFixed(d)
+        // FLOOR, not toFixed. toFixed rounds, so a 0.96 bag retried at zero
+        // decimals became an order for 1 — more than is held on a sell, and more
+        // than the notional every upstream cap was checked against on a buy. The
+        // whole point of shortening the amount is to stay inside what the caller
+        // asked for; a retry that asks for more is a different order.
+        const retryAmount = floorToDecimals(Number(safeAmount), d)
         if (Number(retryAmount) <= 0) break
         payload['amount'] = retryAmount
         res = await geminiPrivateFetch(endpoint, payload, 15_000)
