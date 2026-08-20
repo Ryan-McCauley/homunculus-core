@@ -2,8 +2,19 @@
 
 A starship-bridge command interface for your home, computers, and data — powered by Claude.
 
+### → [See the walkthrough at www.ryanmccauley.com/homunculus](https://www.ryanmccauley.com/homunculus)
+
+Annotated screen captures of every surface — the six tabs, the ⌘K uplink, the agent
+fleet, the architecture and the security model, panel by panel. The fastest way to
+tell whether this is worth standing up on your own hardware.
+
 Inspirations: the Star Trek Enterprise computer, Iron Man's Jarvis, a Bond-villain
 control room, and the eDEX-UI terminal aesthetic.
+
+Also on the walkthrough site:
+[the CRYPTO desk in detail](https://www.ryanmccauley.com/homunculus/crypto) ·
+[full documentation](https://www.ryanmccauley.com/homunculus/docs/)
+(the same pages live in [`docs/`](docs/) here).
 
 ## Tabs
 
