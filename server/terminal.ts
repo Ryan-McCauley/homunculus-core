@@ -11,6 +11,19 @@ import type { Send } from '../shared/protocol'
 const FLUSH_MS = 16
 const FLUSH_BYTES = 64 * 1024
 
+/**
+ * Live PTYs one client connection may hold.
+ *
+ * Each is a real shell process with the backend user's permissions, and `start`
+ * is driven entirely by a client-chosen id — so without a ceiling, one authorised
+ * socket sending `start` in a loop forks shells until the host runs out of process
+ * table or memory. Four is well past what the UI can show (the Terminal widget
+ * opens one, and a grid of them is still single digits) and far below anything
+ * that hurts. Closing the socket disposes them all, so this bounds the live count,
+ * not the lifetime total.
+ */
+export const MAX_SESSIONS_PER_CONNECTION = 4
+
 interface PtyModule {
   spawn(file: string, args: string[], opts: IPtyForkOptions): IPty
 }
@@ -47,6 +60,19 @@ export class TerminalManager {
 
   start(id: string, cols: number, rows: number): void {
     if (this.sessions.has(id)) return
+
+    if (this.sessions.size >= MAX_SESSIONS_PER_CONNECTION) {
+      this.send({
+        ch: 'term',
+        type: 'data',
+        id,
+        data:
+          `\x1b[31m[ Terminal limit ]\x1b[0m This connection already holds ` +
+          `${MAX_SESSIONS_PER_CONNECTION} shells. Close one before opening another.\r\n`
+      })
+      this.send({ ch: 'term', type: 'exit', id, exitCode: 1 })
+      return
+    }
 
     const pty = getPty()
     if (!pty) {

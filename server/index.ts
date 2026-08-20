@@ -4,8 +4,8 @@
 
 import 'dotenv/config'
 import http from 'http'
-import { existsSync, readFileSync, statSync } from 'fs'
-import { extname, join, normalize, sep } from 'path'
+import { existsSync } from 'fs'
+import { join, resolve } from 'path'
 import { WebSocketServer, WebSocket } from 'ws'
 import { telemetryHub } from './telemetry'
 import { ChatSession, chatStatus, addProactiveListener, proactiveMonitor, broadcastProactive } from './chat'
@@ -51,7 +51,8 @@ import { claudeProcesses } from './claudeProcesses'
 import { componentKind, componentLabel, edgeForAudit } from '../shared/timeline'
 import type { TimelineComponent, TimelineEdge, TimelineEvent, TimelineRun } from '../shared/timeline'
 import { ACTOR_HEADER, constantTimeEquals, deriveActor } from '../shared/audit'
-import { isLocalReq, isAllowedOrigin, corsOrigin, securityHeaders, tokenVerdict, adminVerdict } from './httpGates'
+import { isLocalReq, isAllowedOrigin, corsOrigin, securityHeaders, tokenVerdict, adminVerdict, type GateVerdict } from './httpGates'
+import { serveStatic } from './staticFiles'
 import { ALERT_SOURCES, ALERT_TIMEFRAMES } from '../shared/alerts'
 import { getLayout, setLayout, resetLayout, isSetupComplete, markSetupComplete } from './layout'
 import { buildManifest, getSyncConfig, readSyncFile, runSync, setSyncConfig, writeSyncFile } from './sync'
@@ -74,40 +75,45 @@ const TOKEN = process.env['HOMUNCULUS_TOKEN'] || ''
 // log is that the operator's own machine — where every agent and skill also runs
 // — cannot quietly touch the record. Unset means those routes are simply closed.
 const ADMIN_TOKEN = process.env['HOMUNCULUS_ADMIN_TOKEN'] || ''
-const WEB_DIR = process.env['HOMUNCULUS_WEB_DIR'] || join(process.cwd(), 'out', 'renderer')
 
-const MIME: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json',
-  '.svg': 'image/svg+xml',
-  '.woff2': 'font/woff2',
-  '.woff': 'font/woff',
-  '.ttf': 'font/ttf',
-  '.png': 'image/png',
-  '.ico': 'image/x-icon'
-}
+// Where the built web UI lives; ./staticFiles serves it. Resolved, not merely
+// joined: the traversal guard there compares a resolved candidate against this
+// string, so an override carrying a trailing separator or a relative segment
+// (HOMUNCULUS_WEB_DIR=./out/renderer/) would not match its own children and would
+// 403 the entire UI.
+const WEB_DIR = resolve(process.env['HOMUNCULUS_WEB_DIR'] || join(process.cwd(), 'out', 'renderer'))
 
 // The HTTP security posture — the Origin gate, the token gate, the admin gate,
 // the CORS reflection and the defensive headers — now lives in ./httpGates so it
 // can be read and tested as one unit. The wrappers below bind this process's
 // tokens and turn a verdict into a response; the behaviour is unchanged, and the
 // full reasoning for each gate moved with it.
-function requireToken(req: http.IncomingMessage, res: http.ServerResponse): boolean {
-  const verdict = tokenVerdict(req, TOKEN)
-  if (verdict.ok) return true
-  res.writeHead(verdict.code, { 'content-type': 'application/json', 'access-control-allow-origin': corsOrigin(req) })
+//
+// A refused request gets the same defensive headers as a served one. They were
+// missing here, which meant the responses most likely to be reached by something
+// that should not be reaching them — a 401 or a 503 — were the only ones served
+// without nosniff, frame-ancestors or a CSP. `vary: origin` matters for the same
+// reason it does on the success path: the ACAO value is computed per caller, so a
+// cache must not hand one origin's copy to another.
+function refuse(req: http.IncomingMessage, res: http.ServerResponse, verdict: Extract<GateVerdict, { ok: false }>): false {
+  res.writeHead(verdict.code, {
+    'content-type': 'application/json',
+    'access-control-allow-origin': corsOrigin(req),
+    vary: 'origin',
+    ...securityHeaders(),
+  })
   res.end(JSON.stringify({ ok: false, error: verdict.error }))
   return false
 }
 
+function requireToken(req: http.IncomingMessage, res: http.ServerResponse): boolean {
+  const verdict = tokenVerdict(req, TOKEN)
+  return verdict.ok ? true : refuse(req, res, verdict)
+}
+
 function requireAdminToken(req: http.IncomingMessage, res: http.ServerResponse): boolean {
   const verdict = adminVerdict(req, ADMIN_TOKEN)
-  if (verdict.ok) return true
-  res.writeHead(verdict.code, { 'content-type': 'application/json', 'access-control-allow-origin': corsOrigin(req) })
-  res.end(JSON.stringify({ ok: false, error: verdict.error }))
-  return false
+  return verdict.ok ? true : refuse(req, res, verdict)
 }
 
 // ── API routes ────────────────────────────────────────────────────────
@@ -1957,39 +1963,6 @@ function readBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
   })
 }
 
-// ── Static file serving (the web UI) ──────────────────────────────────
-function serveStatic(req: http.IncomingMessage, res: http.ServerResponse): void {
-  if (req.url === '/healthz') {
-    res.writeHead(200, { 'content-type': 'text/plain' }).end('ok')
-    return
-  }
-  if (!existsSync(WEB_DIR)) {
-    res
-      .writeHead(200, { 'content-type': 'text/plain' })
-      .end('Homunculus backend running. Web UI not built — run `npm run build`.')
-    return
-  }
-  const urlPath = (req.url || '/').split('?')[0]
-  let filePath = normalize(join(WEB_DIR, urlPath === '/' ? 'index.html' : urlPath))
-  // Prevent path traversal outside WEB_DIR. The trailing separator matters: without
-  // it, WEB_DIR="/app/out/renderer" would also admit a sibling "/app/out/renderer-x".
-  if (filePath !== WEB_DIR && !filePath.startsWith(WEB_DIR + sep)) {
-    res.writeHead(403).end('forbidden')
-    return
-  }
-  // SPA fallback to index.html for unknown non-file routes.
-  if (!existsSync(filePath) || !statSync(filePath).isFile()) {
-    filePath = join(WEB_DIR, 'index.html')
-  }
-  try {
-    const body = readFileSync(filePath)
-    res.writeHead(200, { 'content-type': MIME[extname(filePath)] || 'application/octet-stream', ...securityHeaders() })
-    res.end(body)
-  } catch {
-    res.writeHead(404).end('not found')
-  }
-}
-
 const server = http.createServer(async (req, res) => {
   const path = (req.url || '/').split('?')[0]
   if (path.startsWith('/api/')) {
@@ -2001,7 +1974,7 @@ const server = http.createServer(async (req, res) => {
     const handled = await withActor(actor, () => handleApi(req, res, path))
     if (handled) return
   }
-  serveStatic(req, res)
+  serveStatic(req, res, WEB_DIR)
 })
 // maxPayload caps a single WS frame; ws's own default is 100 MB, which a
 // terminal or chat connection has no legitimate reason to ever send. 8 MB
@@ -2043,8 +2016,35 @@ server.on('upgrade', (req, socket, head) => {
   wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req))
 })
 
+// ── Liveness ──────────────────────────────────────────────────────────
+//
+// A client that vanishes without a close frame — a phone that sleeps, a laptop
+// that leaves the tailnet, a NAT table that forgets — leaves a socket that looks
+// open to us for as long as the OS keeps the TCP connection around, which can be
+// hours. Every one of those holds a ChatSession, a TerminalManager (with live
+// PTYs) and four hub subscriptions that keep serialising snapshots into a socket
+// nobody is reading. Ping every client on an interval and drop the ones that did
+// not answer the previous round; `ws` replies to a ping automatically, so a client
+// only fails this if it is genuinely gone.
+const HEARTBEAT_MS = 30_000
+const alive = new WeakSet<WebSocket>()
+
+const heartbeat = setInterval(() => {
+  for (const ws of wss.clients) {
+    if (!alive.has(ws)) { ws.terminate(); continue }   // missed the last round
+    alive.delete(ws)
+    try { ws.ping() } catch { ws.terminate() }
+  }
+}, HEARTBEAT_MS)
+// Node keeps the process alive for any pending timer; this one must not be the
+// reason a shut-down server lingers.
+heartbeat.unref()
+
 // ── Per-connection wiring ─────────────────────────────────────────────
 wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
+  alive.add(ws)
+  ws.on('pong', () => alive.add(ws))
+
   const send = (msg: ServerMsg): void => {
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg))
   }
@@ -2219,6 +2219,7 @@ async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return
   shuttingDown = true
   console.log(`[homunculus] ${signal} received, shutting down…`)
+  clearInterval(heartbeat)
   for (const ws of wss.clients) ws.close(1001, 'server shutting down')
   const closed = new Promise<void>((resolve) => server.close(() => resolve()))
   // Bounded: an idle keep-alive HTTP connection can otherwise hold server.close()

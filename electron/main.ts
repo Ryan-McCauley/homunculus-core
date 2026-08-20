@@ -62,6 +62,16 @@ function waitingPage(): string {
 const escapeHtml = (s: string): string =>
   s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`)
 
+/** Schemes we will hand to the OS. See the window-open handler for why. */
+function isExternallyOpenable(url: string): boolean {
+  try {
+    const scheme = new URL(url).protocol
+    return scheme === 'http:' || scheme === 'https:'
+  } catch {
+    return false
+  }
+}
+
 /** Pending reconnect attempt, cleared on window close so it cannot outlive it. */
 let retryTimer: NodeJS.Timeout | null = null
 
@@ -192,8 +202,16 @@ function createWindow(): void {
 
   // target="_blank" links (e.g. the BRIDGE tab's Home Assistant link) open in the
   // system browser, never as a child Electron window.
+  //
+  // Only http(s) is handed to the OS. shell.openExternal launches whatever handler
+  // the platform has registered for a scheme, and the page can put any string in an
+  // href: `file:///…` opens a local path in Finder/Explorer, and a registered
+  // custom scheme starts another application with an argument the page chose. The
+  // renderer shows agent- and feed-authored text, so treat a link the same way the
+  // rest of this app treats that text — as data, checked before it is acted on.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url)
+    if (isExternallyOpenable(url)) void shell.openExternal(url)
+    else console.warn('[shell] refused to open a non-http(s) link:', url.slice(0, 120))
     return { action: 'deny' }
   })
 
