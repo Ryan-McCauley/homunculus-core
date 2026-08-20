@@ -4,7 +4,7 @@
 // and so a formatting tweak lands in both places at once.
 //
 // Every colour here is a CSS custom property, never a literal hex: that is what
-// makes the occult/prism themes restyle this UI for free.
+// makes the prism themes restyle this UI for free.
 
 import type { ReactNode } from 'react'
 

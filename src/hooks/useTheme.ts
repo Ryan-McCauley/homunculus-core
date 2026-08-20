@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 
-export type ThemeId = 'matrix' | 'occult' | 'prism'
+export type ThemeId = 'dev' | 'prism'
 
 export interface Theme {
   id: ThemeId
@@ -9,7 +9,11 @@ export interface Theme {
 }
 
 export const THEMES: Theme[] = [
+<<<<<<< Updated upstream
   { id: 'matrix', label: 'MATRIX', icon: '◈' },
+=======
+  { id: 'dev', label: 'DEV', icon: '◈' },
+>>>>>>> Stashed changes
   { id: 'prism', label: 'PRISM', icon: '◇' },
 ]
 
@@ -24,12 +28,12 @@ function isThemeId(v: string | null): v is ThemeId {
 export function useTheme(): [ThemeId, (id: ThemeId) => void] {
   const [theme, setThemeState] = useState<ThemeId>(() => {
     const saved = localStorage.getItem(STORAGE_KEY)
-    return isThemeId(saved) ? saved : 'matrix'
+    return isThemeId(saved) ? saved : 'dev'
   })
 
   useEffect(() => {
     const html = document.documentElement
-    if (theme === 'matrix') {
+    if (theme === 'dev') {
       html.removeAttribute('data-theme')
     } else {
       html.setAttribute('data-theme', theme)

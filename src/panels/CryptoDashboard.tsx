@@ -3222,10 +3222,10 @@ function TradesSection({ pending, openOrders, safeMode, trades, geminiTrades, au
 // ── Synthesis overview (2026-08 redesign) ──────────────────────────────
 // Instrument deck + positions/exit-plan table + distance-to-fill orders +
 // BTC ladder rungs + confirm queue + strategy fleet. Everything is expressed
-// against the global.css tokens, so the occult/prism themes restyle it too.
+// against the global.css tokens, so the prism themes restyle it too.
 
 /** Categorical slice palette for the allocation donut. Built from the themed indicator
- *  tokens (not fixed hexes) so occult/prism restyle the chart along with everything else. */
+ *  tokens (not fixed hexes) so prism restyle the chart along with everything else. */
 const SLICE_COLORS = [
   'var(--green)', 'var(--ind-band)', 'var(--ind-fast)', 'var(--ind-slow)',
   'var(--holo)', 'var(--ind-rsi)', 'var(--blue)', 'var(--amber)',

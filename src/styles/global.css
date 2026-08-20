@@ -1,5 +1,5 @@
 /* ── Homunculus design tokens ───────────────────────────────────────────
-   The bridge skin: Matrix phosphor-green on near-black, with crimson Bond
+   The bridge skin: Dev phosphor-green on near-black, with crimson Bond
    accents reserved for alerts. Tweak these to re-theme the whole app. */
 :root {
   /* ── Backgrounds ── */
@@ -104,110 +104,8 @@
 
   /* ── Pet / weight chart ── */
   --weight-stripe: #2effb011;
+
 }
-
-/* ── Tactical Night Red theme ───────────────────────────────────────────
-   Night-ops palette: near-black base with deep blood tints, authoritative
-   tactical red primary, hot ember holo field, steel-blue for cool HVAC,
-   smoldering amber for status. Easy to read in darkness. */
-[data-theme="occult"] {
-  /* ── Backgrounds (deep blood-tinted black) ── */
-  --bg: #040000;
-  --bg-panel: #080101;
-  --bg-elev: #0d0101;
-  --bg-meter: #130101;
-
-  /* ── Primary — authoritative tactical red (not harsh pure #ff0000) ── */
-  --green: #d93530;
-  --green-soft: #f09090;
-  --green-dim: #651615;
-  --green-line: #350c0b;
-
-  /* ── Alert / status ── */
-  --crimson: #ff5500;
-  --amber: #cc7700;
-  --cool-color: #446688;
-
-  /* ── Borders / glows ── */
-  --border: #d9353018;
-  --border-strong: #d9353033;
-  --border-crimson: #ff550033;
-  --glow-green: 0 0 6px #d9353044;
-  --glow-crimson: 0 0 6px #ff550066;
-  --glow-text: #d9353055;
-
-  /* ── Holo — deep ember field ── */
-  --holo: #cc2800;
-  --holo-dim: #661200;
-  --blue: #bb4422;
-
-  /* ── Chart indicator palette (distinct from the red/orange candles) ── */
-  --ind-fast: #e8b53a; /* MA20  — gold */
-  --ind-slow: #b884ff; /* MA50  — violet */
-  --ind-band: #45c9db; /* Bollinger — cyan */
-  --ind-rsi:  #ff7ab0; /* RSI pane — pink */
-  --ind-cost: #e6dcc8; /* position cost basis — warm parchment */
-
-  /* ── Holo tile internals ── */
-  --holo-tile-bg: #0d0000cc;
-  --holo-tile-border: #cc28004d;
-  --holo-tile-shadow: #cc28001f;
-  --holo-tile-inset: #cc28000d;
-  --holo-text-shadow: #cc280066;
-  --holo-v-shadow: #cc280055;
-  --holo-bar-track: #1e0000;
-  --holo-bar-glow: #cc2800aa;
-  --holo-btn-bg: #0d000088;
-  --holo-btn-hover-bg: #220000;
-  --holo-btn-hover-glow: #cc280055;
-  --holo-btn-color: #f09090;
-
-  /* ── Navigation tabs ── */
-  --tab-active-bg: #1a0202;
-  --tab-inactive-bg: #0c0101;
-  --tab-glow: #d9353055;
-
-  /* ── UI chrome ── */
-  --ticker-bg: #060000;
-  --chart-track: #220303;
-  --range-track: #1a0202;
-  --card-active-bg: #220303;
-  --card-inactive-bg: #120101;
-
-  /* ── SVG body fills ── */
-  --svg-deep: #0d0000;
-  --svg-panel: #1a0300;
-
-  /* ── Chat / ComputerCore ── */
-  --chat-assistant-glow: #d9353099;
-  --chat-core-glow: #cc770099;
-  --chat-user-color: #7a3535;
-  --chat-core-color: #e8aa55;
-  --chat-core-border: #cc770044;
-  --chat-core-bubble: #0f040088;
-
-  /* ── Terminal (xterm) ── */
-  --term-bg: #040000;
-  --term-fg: #f09090;
-  --term-cursor: #d93530;
-  --term-selection: #d9353033;
-  --term-black: #040000;
-  --term-green: #d93530;
-  --term-red: #ff5500;
-  --term-white: #f09090;
-  --term-bright-white: #ffd0c8;
-
-  /* ── CRT scanline tint ── */
-  --scanline: #cc000008;
-
-  /* ── Header / footer gradient stops ── */
-  --header-top: #0e0000;
-  --header-bot: #060000;
-
-  /* ── Pet / weight chart ── */
-  --weight-stripe: #d9353011;
-}
-
 /* ── Prism (holographic rainbow) theme ──────────────────────────────────
    Iridescent light-field over deep indigo-black. Cyan primary bleeding to
    violet and hot magenta, with animated rainbow sweeps on headers, scan
