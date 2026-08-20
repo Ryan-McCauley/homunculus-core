@@ -1,17 +1,22 @@
 // ── First-run wizard ───────────────────────────────────────────────────
-// Shown once, on a data dir with no setup.json. Three steps: pick the modules
-// you want, supply their keys, choose what opens on launch. Everything here is
-// reachable later from SETTINGS — the wizard just walks a new user through it
-// instead of dropping them into a dashboard full of dead panels.
+// Shown once, on a data dir with no setup.json. Four steps: pick the modules you
+// want, supply their keys, confirm the devices found in your house, choose what
+// opens on launch. Everything here is reachable later from SETTINGS or from the
+// HOME tab's TILES editor — the wizard just walks a new user through it instead
+// of dropping them into a dashboard full of dead panels.
 //
-// Nothing is mandatory. Skipping leaves every tab enabled and no keys set,
-// which is exactly the pre-wizard behaviour.
+// Nothing is mandatory. Skipping leaves every tab enabled, no keys set, and
+// whatever device tiles discovery found on its own.
 
 import { useMemo, useState } from 'react'
 import type { LayoutApi } from '../hooks/useLayout'
 import { useSecrets } from '../hooks/useSecrets'
+import { useHomeAssistant } from '../hooks/useHomeAssistant'
+import { useHomeTiles } from '../hooks/useHomeTiles'
 import { setSetupComplete } from '../lib/layoutApi'
 import { SECRET_SPECS } from '../../shared/secrets'
+import { getTileSpec } from '../../shared/homeTileSpecs'
+import { TileConfigPanel } from './home/TileConfigPanel'
 
 const btn = (primary = false): React.CSSProperties => ({
   fontSize: 10, letterSpacing: 1, padding: '6px 14px', cursor: 'pointer',
@@ -25,6 +30,10 @@ export function FirstRun({ layout, onDone }: { layout: LayoutApi; onDone: () => 
   const [step, setStep] = useState(0)
   const { layout: l, update } = layout
   const secrets = useSecrets()
+  const haSnap = useHomeAssistant()
+  const tilesApi = useHomeTiles()
+  const [editingTiles, setEditingTiles] = useState(false)
+  const haEntities = haSnap?.entities ?? []
 
   // Modules the user has switched on. Seeded from the layout's enabled tabs so
   // re-running the wizard reflects reality.
@@ -56,7 +65,7 @@ export function FirstRun({ layout, onDone }: { layout: LayoutApi; onDone: () => 
       }}>
         <span style={{ fontSize: 12, letterSpacing: 3, color: 'var(--green)' }}>HOMUNCULUS · SETUP</span>
         <span style={{ flex: 1 }} />
-        {['MODULES', 'KEYS', 'LAUNCH'].map((label, i) => (
+        {['MODULES', 'KEYS', 'DEVICES', 'LAUNCH'].map((label, i) => (
           <span key={label} style={{
             fontSize: 9, letterSpacing: 2,
             color: i === step ? 'var(--green)' : 'var(--green-dim)',
@@ -124,6 +133,33 @@ export function FirstRun({ layout, onDone }: { layout: LayoutApi; onDone: () => 
 
         {step === 2 && (
           <Step
+            title="Devices found in your house"
+            note={
+              haEntities.length === 0
+                ? 'Home Assistant is not reporting anything yet. Set HA_URL and HA_TOKEN on the previous step (or in .env) and Homunculus will scan for devices the moment it connects — you do not have to come back here.'
+                : 'Homunculus scanned your Home Assistant and built a tile for each device it recognised. Check the names look right. Anything it guessed wrong — or missed — is fixable here and later, from the TILES button on the HOME tab.'
+            }
+          >
+            {editingTiles ? (
+              <TileConfigPanel
+                api={tilesApi}
+                entities={haEntities}
+                onClose={() => setEditingTiles(false)}
+              />
+            ) : (
+              <DiscoverySummary
+                tiles={tilesApi.config.tiles}
+                entityCount={haEntities.length}
+                busy={tilesApi.busy}
+                onEdit={() => setEditingTiles(true)}
+                onRescan={tilesApi.rescan}
+              />
+            )}
+          </Step>
+        )}
+
+        {step === 3 && (
+          <Step
             title="Which tab opens on launch?"
             note="You can reorder the tab bar and change this later in SETTINGS ▸ TABS."
           >
@@ -149,7 +185,7 @@ export function FirstRun({ layout, onDone }: { layout: LayoutApi; onDone: () => 
         <button onClick={finish} style={btn()}>SKIP SETUP</button>
         <span style={{ flex: 1 }} />
         {step > 0 && <button onClick={() => setStep(step - 1)} style={btn()}>◂ BACK</button>}
-        {step < 2
+        {step < 3
           ? <button onClick={() => setStep(step + 1)} style={btn(true)}>NEXT ▸</button>
           : <button onClick={finish} style={btn(true)}>ENTER HOMUNCULUS</button>}
       </footer>
@@ -230,6 +266,61 @@ export function DocsLink({ url, label }: { url: string; label: string }): JSX.El
     >
       {label} ↗
     </a>
+  )
+}
+
+/**
+ * What discovery found, in one glance.
+ *
+ * A list, not a wall of dropdowns. The wizard's job at this step is to let a new
+ * user confirm that "Washer", "Upstairs" and "Katzenklo" are the things they
+ * actually own — the full binding editor is one button away for the cases where
+ * they aren't, and unreachable clutter for the majority where they are.
+ */
+function DiscoverySummary({ tiles, entityCount, busy, onEdit, onRescan }: {
+  tiles: ReturnType<typeof useHomeTiles>['config']['tiles']
+  entityCount: number
+  busy: boolean
+  onEdit: () => void
+  onRescan: () => void
+}): JSX.Element {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxWidth: 780 }}>
+      {tiles.length === 0 ? (
+        <div style={{ fontSize: 10, color: 'var(--green-dim)', lineHeight: 1.6 }}>
+          {entityCount === 0
+            ? 'Nothing to show yet — no entities have arrived from Home Assistant.'
+            : `No devices recognised among ${entityCount} entities. Your integrations may name things unusually; you can bind tiles by hand, and every entity is still listed on the HOME tab under SECTORS and REGISTRY.`}
+        </div>
+      ) : (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 8 }}>
+          {tiles.map((tile) => {
+            const spec = getTileSpec(tile.type)
+            const bound = Object.keys(tile.bindings).length + (tile.rows?.length ?? 0)
+            return (
+              <div key={tile.id} style={{
+                padding: 10, background: 'var(--bg-elev)', border: '0.5px solid var(--border)',
+              }}>
+                <div style={{ fontSize: 11, letterSpacing: 1, color: 'var(--green)' }}>
+                  <i className={`ti ${spec?.icon ?? 'ti-square'}`} style={{ marginRight: 6 }} />
+                  {tile.title || spec?.defaultTitle}
+                </div>
+                <div style={{ fontSize: 9, color: 'var(--green-dim)', marginTop: 3 }}>
+                  {spec?.label} · {bound} {tile.rows ? 'row' : 'entit'}{bound === 1 ? (tile.rows ? '' : 'y') : (tile.rows ? 's' : 'ies')} bound
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button onClick={onEdit} style={btn(true)}>ADJUST TILES</button>
+        <button onClick={onRescan} disabled={busy || entityCount === 0} style={btn()}>
+          {busy ? '…' : '⟳ SCAN AGAIN'}
+        </button>
+      </div>
+    </div>
   )
 }
 

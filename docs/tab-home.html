@@ -99,7 +99,7 @@ alarm_control_panel, camera, humidifier, water_heater</code></pre>
 <ul>
   <li><code>climate</code> — typed climate states for the thermostat panels (current/target temps, humidity, HVAC action).</li>
   <li><code>entities</code> — a flat, generic list of every relevant entity (id, domain, friendly name, state, unit, device class, attributes, last-changed).</li>
-  <li><code>devices</code> — the same entities grouped into logical devices by id/name pattern match (e.g. <em>Voltaire</em>, <em>R2PEEPOO</em>, <em>Washer</em>, <em>Dryer</em>, <em>Thermostat</em>, <em>Colony</em>, <em>Backup</em> — first match wins; edit <code>DEVICE_DEFS</code> to suit your house).</li>
+  <li><code>devices</code> — the same entities grouped into logical devices by their shared id stem: <code>sensor.washer_current_status</code> and <code>switch.washer_power</code> both stem to <code>washer</code>, so they are one device. Groups of a single entity are dropped. Nothing here is named in advance, so the grouping works the same on any install.</li>
 </ul>
 
 <h3>Area registry</h3>
@@ -118,7 +118,7 @@ alarm_control_panel, camera, humidifier, water_heater</code></pre>
 
 <table>
   <tr><th>View</th><th>What it shows</th></tr>
-  <tr><td><strong>OVERVIEW</strong></td><td>The dashboard: a scene strip, a sector strip, thermostat + ambient + litter-robot tiles, a full-width laundry bay, perimeter/power/media tiles, and the colony row. The masthead tallies subsystems and alerts.</td></tr>
+  <tr><td><strong>OVERVIEW</strong></td><td>The dashboard: a scene strip, a sector strip, then this install’s configured device tiles (thermostats, ambient, appliances, litter robots, pets), plus the always-generic perimeter/power/media row. The masthead tallies subsystems and alerts. Which tiles exist is configuration, not code — see “Device tiles” below.</td></tr>
   <tr><td><strong>SECTORS</strong></td><td>Room-by-room view built from the sector summaries above, with per-sector entity lists and controls.</td></tr>
   <tr><td><strong>DEVICES</strong></td><td>Integration management in three bands: devices HA discovered on the network by itself, integrations already configured (with reload/remove), and a picker for adding one by name. See "Adding devices" below.</td></tr>
   <tr><td><strong>REGISTRY</strong></td><td>The escape hatch: every relevant entity, filterable by domain, free text, state, and sector, sortable by last-changed, name, id, or state (<code>shared/haRegistry.ts</code>). A device that never earns a bespoke tile is still one query away here.</td></tr>
@@ -155,6 +155,26 @@ The entity IDs in the shipped routines are best-guess defaults (<code>climate.ma
 
 <h3>What the Computer Core may command</h3>
 <p>Commands the model itself decides to issue from free-form chat go through <code>executeHaCommand</code>, which enforces a domain allowlist in code: <code>climate, switch, vacuum, cover, fan, light, media_player, number, select, button</code>. Security-relevant domains — locks, alarm panels — and anything else off the list are refused outright, and the check is applied to the <em>service</em> domain (the thing that actually executes) as well as the entity domain, with any model-supplied <code>entity_id</code> override stripped from the payload. Your own HOME tab controls are not restricted by this list — the operator is entitled to control anything in their own house.</p>
+
+<h2>Device tiles</h2>
+<p>The tiles on OVERVIEW — thermostat, ambient, appliance, litter robot, pets — are <em>bound</em>, not hardcoded. A tile type is described as data in <code>shared/homeTileSpecs.ts</code>: a set of named <strong>slots</strong> (“status sensor”, “waste drawer %”, “child lock”) plus <strong>options</strong> (thresholds, cycle phase names, the status codes that mean a pet is inside the box). What sits behind each slot on <em>your</em> install lives in <code>data/home-tiles.json</code>. The tile components read the house through slots (<code>r.num('wasteDrawer')</code>) and never name an entity id, so one component draws a Litter-Robot called R2PEEPOO and one called Katzenklo, and a house with three thermostats gets three tiles from the same code.</p>
+
+<h3>Discovery</h3>
+<p>On a fresh data dir the server runs discovery once, the first time a connected snapshot arrives — before anyone opens the UI, so every surface sees the same populated tab. It anchors on the things it can be certain about (every <code>climate.*</code> entity is a thermostat) and fills the remaining slots from the anchor’s own device, ranked by device identity first and by <code>device_class</code>/keywords second. Two rules keep it honest: a slot is only filled by an entity that actually <em>matches</em> it, and slots marked <code>sameDevice</code> refuse anything from another device. A washer with no child lock therefore gets an empty slot rather than borrowing the dryer’s. Discovery never re-runs on its own — a binding you corrected is a decision, and a background pass would undo it the next time HA restarted with a renamed entity.</p>
+
+<h3>Correcting it</h3>
+<p>The <strong>TILES</strong> chip on the OVERVIEW rail (and the DEVICES step of the first-run wizard) opens the editor. Every slot is a dropdown listing every legal entity for that slot, ordered by how well discovery thinks it fits — nothing is hidden, because a house that names things unusually is exactly the house that needs the full list. Tiles can be renamed, reordered, hidden, deleted, or added by hand; thresholds and vocabulary are editable per tile. <strong>SCAN FOR NEW DEVICES</strong> is safe to press repeatedly: it appends tiles for devices no tile already claims and leaves everything else verbatim.</p>
+
+<table>
+  <tr><th>Route</th><th>What it does</th></tr>
+  <tr><td><code>GET /api/home-tiles</code></td><td>The current configuration.</td></tr>
+  <tr><td><code>POST /api/home-tiles</code></td><td>Replace it. Sanitized — unknown tile types, non-entity-id bindings and out-of-range thresholds are dropped or clamped rather than persisted.</td></tr>
+  <tr><td><code>POST /api/home-tiles/rescan</code></td><td>Append tiles for newly-appeared devices, keeping existing ones.</td></tr>
+  <tr><td><code>POST /api/home-tiles/reset</code></td><td>Discard everything and rediscover from the house as it is now.</td></tr>
+</table>
+
+<div class="callout"><span class="callout-title">Note</span>
+Discovery is a guess and is treated as one. It recognises the naming conventions common integrations use — which covers most houses and no house completely. A device it misses is still fully reachable under SECTORS and REGISTRY, and is one dropdown away from a tile of its own.</div>
 
 <h2>Homewatch (device monitoring)</h2>
 <p><code>server/homewatch.ts</code> watches entity-state <em>transitions</em> on the server and emits toast events for the connected things in the home. Every event goes through <code>broadcastProactive</code>, which fires a toast on every client and writes a durable ARCHIVE record; these events carry <code>chatLog: false</code>, so device chatter never spams the Computer Core conversation. Because it runs server-side, the watching continues even with no UI open. What it watches:</p>

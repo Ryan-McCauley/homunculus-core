@@ -6,6 +6,8 @@
 
 import type { HaAreaRegistry, HaClimateState, HaEntity, HaDevice, HaSnapshot } from '../shared/homeassistant'
 import { fetchAreaRegistry } from './haAreaRegistry'
+import { stemOf } from '../shared/homeTiles'
+import { prettyStem } from '../shared/homeTileSpecs'
 
 const HA_URL = (process.env['HA_URL'] || '').replace(/\/$/, '')
 const HA_TOKEN = process.env['HA_TOKEN'] || ''
@@ -24,21 +26,23 @@ const HEADERS = { Authorization: `Bearer ${HA_TOKEN}`, 'Content-Type': 'applicat
 export const RELEVANT_DOMAINS = new Set([
   'climate', 'sensor', 'binary_sensor', 'switch', 'lock', 'cover', 'select',
   'number', 'button', 'vacuum', 'media_player', 'weather', 'device_tracker',
-  'update', 'person', 'sun', 'todo',
+  'update', 'person', 'sun', 'todo', 'event',
   'light', 'scene', 'script', 'automation', 'fan', 'input_boolean',
   'alarm_control_panel', 'camera', 'humidifier', 'water_heater'
 ])
 
-// Logical device grouping by id/name substring. Order matters — first match wins.
-const DEVICE_DEFS: Array<{ key: string; label: string; match: RegExp }> = [
-  { key: 'voltaire', label: 'Voltaire', match: /voltaire/i },
-  { key: 'r2peepoo', label: 'R2PEEPOO', match: /r2peepoo/i },
-  { key: 'washer', label: 'Washer', match: /(^|\.)washer|washer/i },
-  { key: 'dryer', label: 'Dryer', match: /(^|\.)dryer|dryer/i },
-  { key: 'thermostat', label: 'Thermostat', match: /thermostat/i },
-  { key: 'colony', label: 'Colony', match: /(pazoozoo|piggy|smithers|willow|zelda)/i },
-  { key: 'backup', label: 'Backup', match: /(^|\.)backup/i }
-]
+// Logical device grouping.
+//
+// This used to be a table of seven regexes naming one household's devices —
+// voltaire, r2peepoo, the cats by name. Anyone else's install grouped into
+// nothing. Grouping is now derived from the entity ids themselves: entities
+// sharing a device stem (`washer_power` and `washer_current_status` both stem to
+// `washer`) are one device, which is the convention every integration follows
+// and the same rule shared/homeTiles.ts binds tiles with.
+//
+// Singletons are dropped. A device is only interesting here as a GROUPING, and a
+// group of one is just the entity, which callers already have in `entities`.
+const MIN_DEVICE_ENTITIES = 2
 
 /** Ceiling on any single HA request. Node's fetch has NO default timeout, so without
  *  this a half-open connection stalls a poll indefinitely. Kept just under the poll
@@ -130,12 +134,16 @@ function parseEntity(entity: Record<string, unknown>): HaEntity {
 
 function groupDevices(entities: HaEntity[]): HaDevice[] {
   const byKey = new Map<string, HaDevice>()
-  for (const def of DEVICE_DEFS) byKey.set(def.key, { key: def.key, label: def.label, entities: [] })
   for (const e of entities) {
-    const def = DEVICE_DEFS.find((d) => d.match.test(e.entityId) || d.match.test(e.name))
-    if (def) byKey.get(def.key)!.entities.push(e)
+    const key = stemOf(e.entityId)
+    if (!key) continue
+    const existing = byKey.get(key)
+    if (existing) existing.entities.push(e)
+    else byKey.set(key, { key, label: prettyStem(key), entities: [e] })
   }
-  return [...byKey.values()].filter((d) => d.entities.length > 0)
+  return [...byKey.values()]
+    .filter((d) => d.entities.length >= MIN_DEVICE_ENTITIES)
+    .sort((a, b) => a.label.localeCompare(b.label))
 }
 
 async function fetchSnapshot(): Promise<Omit<HaSnapshot, 'ts' | 'connected'>> {

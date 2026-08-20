@@ -20,7 +20,7 @@ import { describe, it, expect, vi } from 'vitest'
 // indirectly through subscribe()/unsubscribe below — it is wiring, not logic.
 // What IS covered in depth is the classification/shaping logic that would
 // otherwise be untestable because it is private: RELEVANT_DOMAINS filtering,
-// parseClimate/parseEntity field mapping, and groupDevices' regex matching —
+// parseClimate/parseEntity field mapping, and groupDevices' stem grouping —
 // all exercised through the public snapshot the hub emits.
 
 async function freshModule(env: { url?: string; token?: string; pollMs?: string } = {}) {
@@ -52,6 +52,14 @@ const STATES_FIXTURE = [
   {
     entity_id: 'cover.voltaire_charge_port_door', state: 'closed',
     attributes: { friendly_name: 'Voltaire Charge Port' }, last_changed: '2026-01-01T00:00:03Z',
+  },
+  {
+    entity_id: 'switch.washer_power', state: 'on',
+    attributes: { friendly_name: 'Washer Power' }, last_changed: '2026-01-01T00:00:05Z',
+  },
+  {
+    entity_id: 'sensor.r2peepoo_waste_drawer', state: '31',
+    attributes: { friendly_name: 'R2PEEPOO Waste drawer' }, last_changed: '2026-01-01T00:00:06Z',
   },
   {
     // Irrelevant domain — must be filtered out of `entities`.
@@ -127,7 +135,10 @@ describe('subscribe — snapshot shaping', () => {
     unsub()
   })
 
-  it('groups entities into logical devices by regex, dropping empty groups', async () => {
+  // Grouping is derived from the entity ids, NOT from a table of this
+  // household's device names. The old table matched /voltaire/, /r2peepoo/ and
+  // the five cats by name, so every other install grouped into nothing.
+  it('groups entities into devices by their shared id stem', async () => {
     const m = await freshModule()
     vi.stubGlobal('fetch', mockFetchHappy())
     const listener = vi.fn()
@@ -136,12 +147,35 @@ describe('subscribe — snapshot shaping', () => {
     const snap = listener.mock.calls[listener.mock.calls.length - 1]![0]
     const byKey: Record<string, string[]> = {}
     for (const d of snap.devices) byKey[d.key] = d.entities.map((e: { entityId: string }) => e.entityId)
-    expect(byKey['voltaire']).toEqual(['cover.voltaire_charge_port_door'])
-    expect(byKey['r2peepoo']).toEqual(['vacuum.r2peepoo_litter_box'])
-    expect(byKey['washer']).toEqual(['sensor.washer_current_status'])
-    expect(byKey['thermostat']).toEqual(['climate.main_thermostat'])
-    // Devices with no matching entities (dryer, colony, backup) must not appear.
-    expect(snap.devices.map((d: { key: string }) => d.key)).not.toContain('dryer')
+    expect(byKey['washer']).toEqual(['sensor.washer_current_status', 'switch.washer_power'])
+    expect(byKey['r2peepoo']).toEqual(['vacuum.r2peepoo_litter_box', 'sensor.r2peepoo_waste_drawer'])
+    unsub()
+  })
+
+  it('labels a device from its stem rather than from a hardcoded name', async () => {
+    const m = await freshModule()
+    vi.stubGlobal('fetch', mockFetchHappy())
+    const listener = vi.fn()
+    const unsub = m.haHub.subscribe(listener)
+    await wait(10)
+    const snap = listener.mock.calls[listener.mock.calls.length - 1]![0]
+    expect(snap.devices.find((d: { key: string }) => d.key === 'washer')?.label).toBe('Washer')
+    unsub()
+  })
+
+  // A group of one is not a grouping — it is the entity, which callers already
+  // have in `entities`. Emitting one per standalone sensor would bury the real
+  // multi-entity devices in noise.
+  it('drops single-entity groups', async () => {
+    const m = await freshModule()
+    vi.stubGlobal('fetch', mockFetchHappy())
+    const listener = vi.fn()
+    const unsub = m.haHub.subscribe(listener)
+    await wait(10)
+    const snap = listener.mock.calls[listener.mock.calls.length - 1]![0]
+    const keys = snap.devices.map((d: { key: string }) => d.key)
+    expect(keys).not.toContain('voltaire_charge_port')
+    expect(keys).not.toContain('main_thermostat')
     unsub()
   })
 

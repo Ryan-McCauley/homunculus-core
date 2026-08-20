@@ -55,6 +55,9 @@ import { isLocalReq, isAllowedOrigin, corsOrigin, securityHeaders, tokenVerdict,
 import { serveStatic } from './staticFiles'
 import { ALERT_SOURCES, ALERT_TIMEFRAMES } from '../shared/alerts'
 import { getLayout, setLayout, resetLayout, isSetupComplete, markSetupComplete } from './layout'
+import {
+  getHomeTiles, setHomeTiles, rediscoverHomeTiles, resetHomeTiles, ensureDiscovered,
+} from './homeTiles'
 import { buildManifest, getSyncConfig, readSyncFile, runSync, setSyncConfig, writeSyncFile } from './sync'
 import { SYNC_AREAS } from '../shared/sync'
 import { applyVault, status as secretStatus, moduleReadiness } from './secrets'
@@ -231,6 +234,45 @@ async function handleApi(
   if (path === '/api/layout/reset' && req.method === 'POST') {
     if (!requireToken(req, res)) return true
     return json(200, { ok: true, layout: resetLayout() }), true
+  }
+
+  // ── Home tiles: which device tiles the HOME tab shows, and what each is
+  // bound to. Separate from /api/layout because it is bound to THIS HOUSE
+  // rather than to this screen — the same tile config feeds the HOME tab's
+  // overview and the BRIDGE sidebar widgets, which have no layout in common.
+
+  // GET /api/home-tiles
+  if (path === '/api/home-tiles' && req.method === 'GET') {
+    if (!requireToken(req, res)) return true
+    return json(200, { ok: true, config: getHomeTiles() }), true
+  }
+
+  // POST /api/home-tiles  — replace the whole config (body.config)
+  if (path === '/api/home-tiles' && req.method === 'POST') {
+    if (!requireToken(req, res)) return true
+    const body = await readBody(req)
+    return json(200, { ok: true, config: setHomeTiles(body['config'] ?? body) }), true
+  }
+
+  // POST /api/home-tiles/rescan  — add tiles for devices that appeared since
+  // setup, leaving every existing tile exactly as the user left it.
+  if (path === '/api/home-tiles/rescan' && req.method === 'POST') {
+    if (!requireToken(req, res)) return true
+    const entities = haHub.getLatest()?.entities ?? []
+    if (entities.length === 0) {
+      return json(503, { ok: false, error: 'Home Assistant has no entities to scan' }), true
+    }
+    return json(200, { ok: true, config: rediscoverHomeTiles(entities) }), true
+  }
+
+  // POST /api/home-tiles/reset  — discard the config and rebuild from the house.
+  if (path === '/api/home-tiles/reset' && req.method === 'POST') {
+    if (!requireToken(req, res)) return true
+    const entities = haHub.getLatest()?.entities ?? []
+    if (entities.length === 0) {
+      return json(503, { ok: false, error: 'Home Assistant has no entities to scan' }), true
+    }
+    return json(200, { ok: true, config: resetHomeTiles(entities) }), true
   }
 
   // ── Node sync ─────────────────────────────────────────────────────────
@@ -2158,6 +2200,13 @@ homeWatcher.start()
 void cryptoHub.start()
 // Wakes enabled INTELLIGENCE agents on their interval / portfolio events.
 agentFleet.startWatching()
+
+// First-run HOME tile discovery. Runs off the snapshot stream rather than at
+// boot because the entity list does not exist until HA has answered once; the
+// call is a no-op after the first success, so the cost is one flag read per poll.
+haHub.subscribe((snap) => {
+  if (snap.connected && !snap.stale) ensureDiscovered(snap.entities)
+})
 
 // Start history capture. Tees are process-wide (not per-connection) so data is
 // captured even when no UI client is connected.

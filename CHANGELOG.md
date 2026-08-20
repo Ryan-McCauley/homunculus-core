@@ -28,6 +28,35 @@ All notable changes to Homunculus Core are documented here. This project follows
   client-chosen id with no ceiling, so one authorised socket could fork shells
   until the host ran out of process table.
 
+### Changed
+
+- **HOME device tiles are configurable per install.** The thermostat, appliance,
+  litter-robot, pets and ambient tiles used to name entity ids as literals
+  (`climate.thermostat`, `vacuum.r2peepoo_litter_box`, a five-name `CATS`
+  array), so they rendered on exactly one house and were blank on every other.
+  Tiles now render against named slots bound to whatever entities an install
+  actually has, stored in `data/home-tiles.json`. Thresholds and vocabulary —
+  the waste-drawer percentages, the cycle phase names, the status codes meaning
+  "a pet is inside" — are per-tile options too.
+- **Devices are discovered, not declared.** On a fresh data dir the server scans
+  Home Assistant once, on the first connected snapshot, and builds a tile per
+  recognised device. Correct or extend it from the HOME tab's TILES editor or
+  the first-run wizard's DEVICES step; re-scan to pick up devices added later.
+  Discovery never re-runs on its own, so a corrected binding stays corrected.
+- `snapshot.devices` groups entities by their shared id stem instead of by a
+  hardcoded table of one household's device names.
+- `event` joins the relevant-domain set, so appliance "cycle done" entities
+  reach the UI for the first time.
+- **Node 22 LTS across the board.** `.nvmrc` already said 22 and the toolchain
+  (Electron 41, `@electron/rebuild` 4) requires ≥22.12, while the README, the
+  docs and the Dockerfile still said 20. `package.json` now declares `engines`
+  so the package manager says so at install time.
+- **`server/staticFiles.ts` and `server/orderMath.ts`** split the static-file
+  and order-precision decisions out of `server/index.ts` and `server/crypto.ts`,
+  following the precedent set by `server/httpGates.ts`. Both were previously
+  untestable — one inside a module that starts a listening server on import, the
+  other wrapped around a network fetch — and both are now covered directly.
+
 ### Fixed
 
 - **An order retry could ask for more than the caller authorised.** When Gemini
@@ -55,18 +84,13 @@ All notable changes to Homunculus Core are documented here. This project follows
 - **`/api/audit?action=` answers the same query the same way from either
   backend.** An unescaped `%` or `_` was a wildcard to Postgres and a literal to
   the file scan.
-
-### Changed
-
-- **Node 22 LTS across the board.** `.nvmrc` already said 22 and the toolchain
-  (Electron 41, `@electron/rebuild` 4) requires ≥22.12, while the README, the
-  docs and the Dockerfile still said 20. `package.json` now declares `engines`
-  so the package manager says so at install time.
-- **`server/staticFiles.ts` and `server/orderMath.ts`** split the static-file
-  and order-precision decisions out of `server/index.ts` and `server/crypto.ts`,
-  following the precedent set by `server/httpGates.ts`. Both were previously
-  untestable — one inside a module that starts a listening server on import, the
-  other wrapped around a network fetch — and both are now covered directly.
+- The litter tile's night-light button called the *reset* button entity —
+  the label said one thing and the click did another. It now cycles the
+  night-light select, and is hidden when nothing is bound to it.
+- Appliance tiles no longer show the washer's cycle count on the dryer, and no
+  longer borrow a sibling appliance's controls when the device lacks its own.
+- The thermostat's +/- buttons round to the configured step instead of to whole
+  degrees, which previously made a sub-degree step a no-op.
 
 ## [1.0.0] — 2026-08-13
 

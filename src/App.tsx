@@ -8,6 +8,7 @@ import { WidgetContextProvider } from './widgets/registry'
 import { Settings } from './panels/Settings'
 import { FirstRun } from './panels/FirstRun'
 import { useHomeAssistant } from './hooks/useHomeAssistant'
+import { useHomeTiles } from './hooks/useHomeTiles'
 import { useProactiveToasts } from './hooks/useProactiveToasts'
 import { useCryptoPositions } from './hooks/useCryptoPositions'
 import { ToastOverlay } from './components/ToastOverlay'
@@ -24,6 +25,10 @@ export default function App(): JSX.Element {
   const data = useTelemetry()
   const haSnap = useHomeAssistant()
   const haEntities = haSnap?.entities ?? []
+  const haTempUnit = haSnap?.tempUnit ?? '°F'
+  // One poll of the tile configuration for the whole shell: the HOME tab and
+  // every HOME sidebar widget bind against the same answer.
+  const homeTiles = useHomeTiles()
   const [theme, setTheme] = useTheme()
   // Server-driven: every connected-thing event arrives on the proactive channel
   // (already archived) and is surfaced here as a toast. See server/homewatch.ts.
@@ -84,7 +89,9 @@ export default function App(): JSX.Element {
   }, [layout, tab])
 
   return (
-    <WidgetContextProvider value={{ telemetry: data, haEntities, sendHaCmd, crypto }}>
+    <WidgetContextProvider
+      value={{ telemetry: data, haEntities, sendHaCmd, crypto, homeTiles: homeTiles.config, haTempUnit }}
+    >
       <div
         className="crt-scan"
         style={{

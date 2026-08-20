@@ -2,6 +2,7 @@
 // base/token resolution in lib/api.ts and transport.ts.
 
 import type { LayoutConfig } from '../../shared/layout'
+import type { HomeTilesConfig } from '../../shared/homeTiles'
 import type { SecretSpec, SecretStatus, SecretsCapability } from '../../shared/secrets'
 import type { SyncAreaDef, SyncConfig, SyncPeer, SyncRunReport } from '../../shared/sync'
 
@@ -87,3 +88,19 @@ export const saveSyncConfig = async (
 
 export const runSync = async (): Promise<SyncRunReport> =>
   (await post<{ report: SyncRunReport }>('/api/sync/run')).report
+
+// ── Home tiles ─────────────────────────────────────────────────────────────
+
+export const fetchHomeTiles = async (): Promise<HomeTilesConfig> =>
+  (await get<{ config: HomeTilesConfig }>('/api/home-tiles')).config
+
+export const saveHomeTiles = async (config: HomeTilesConfig): Promise<HomeTilesConfig> =>
+  (await post<{ config: HomeTilesConfig }>('/api/home-tiles', { config })).config
+
+/** Add tiles for devices that appeared since setup, keeping the rest untouched. */
+export const rescanHomeTiles = async (): Promise<HomeTilesConfig> =>
+  (await post<{ config: HomeTilesConfig }>('/api/home-tiles/rescan')).config
+
+/** Discard the configuration and rebuild it from the house as it is now. */
+export const resetHomeTiles = async (): Promise<HomeTilesConfig> =>
+  (await post<{ config: HomeTilesConfig }>('/api/home-tiles/reset')).config

@@ -11,6 +11,8 @@
 import { createContext, useContext } from 'react'
 import type { TelemetrySnapshot } from '../../shared/telemetry'
 import type { HaEntity } from '../../shared/homeassistant'
+import type { HomeTilesConfig } from '../../shared/homeTiles'
+import { getTileSpec, tileRenderable } from '../../shared/homeTileSpecs'
 import type { useCryptoPositions } from '../hooks/useCryptoPositions'
 
 import { SystemVitals } from '../panels/SystemVitals'
@@ -23,7 +25,9 @@ import { DataDashboard } from '../panels/DataDashboard'
 import { ArchiveDashboard } from '../panels/ArchiveDashboard'
 import { CryptoDashboard } from '../panels/CryptoDashboard'
 import { OpenTradesWidget } from '../panels/OpenTradesWidget'
-import { LaundryStatus, LitterRobotStatus, ColonyTile, AmbientTile } from '../panels/HoloTiles'
+import {
+  ApplianceStatus, LitterStatus, PetsTile, AmbientTile, ThermostatTile, type TileProps,
+} from '../panels/HoloTiles'
 import { Placeholder } from '../components/Placeholder'
 
 // ── Shared context ──────────────────────────────────────────────────────
@@ -33,6 +37,9 @@ export interface WidgetContextValue {
   haEntities: HaEntity[]
   sendHaCmd: (entityId: string, service: string, data: Record<string, unknown>) => void
   crypto: ReturnType<typeof useCryptoPositions>
+  /** Which device tiles this install has, and what each is bound to. */
+  homeTiles: HomeTilesConfig
+  haTempUnit: string
 }
 
 const Ctx = createContext<WidgetContextValue | null>(null)
@@ -43,6 +50,40 @@ export function useWidgetContext(): WidgetContextValue {
   const v = useContext(Ctx)
   if (!v) throw new Error('useWidgetContext outside <WidgetContextProvider>')
   return v
+}
+
+// ── HOME tile widgets ───────────────────────────────────────────────────
+//
+// A HOME widget is not one device — it is EVERY configured device of a type. The
+// widget ids below are the ones that shipped ('home.laundry', 'home.colony'), so
+// a layout saved before tiles were configurable keeps working; only the labels
+// moved on, because the panel now shows whatever appliances or pets this house
+// has rather than one washer, one dryer and five named cats.
+//
+// Stacking rather than picking a single tile is deliberate: it reproduces the
+// old sidebar (washer above dryer) without the placement needing to name a tile,
+// and a house with one appliance simply gets one card.
+
+function HomeTiles({
+  type, render: Render,
+}: {
+  type: string
+  render: (props: TileProps) => JSX.Element | null
+}): JSX.Element | null {
+  const { haEntities, sendHaCmd, homeTiles, haTempUnit } = useWidgetContext()
+  const spec = getTileSpec(type)
+  if (!spec) return null
+
+  const tiles = homeTiles.tiles.filter((t) => t.type === type && tileRenderable(t, spec))
+  if (tiles.length === 0) return null
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      {tiles.map((tile) => (
+        <Render key={tile.id} tile={tile} entities={haEntities} send={sendHaCmd} unit={haTempUnit} />
+      ))}
+    </div>
+  )
 }
 
 // ── Registry ────────────────────────────────────────────────────────────
@@ -88,30 +129,29 @@ export const WIDGETS: WidgetDef[] = [
     render: () => <HomeAssistant />,
   }),
   def({
-    id: 'home.laundry', label: 'Laundry', category: 'HOME',
+    id: 'home.laundry', label: 'Appliances', category: 'HOME',
     defaultW: 2, defaultH: 4, minW: 2, minH: 3,
-    render: () => {
-      const { haEntities, sendHaCmd } = useWidgetContext()
-      return <LaundryStatus entities={haEntities} send={sendHaCmd} />
-    },
+    render: () => <HomeTiles type="appliance" render={ApplianceStatus} />,
   }),
   def({
     id: 'home.litter', label: 'Litter Robot', category: 'HOME',
     defaultW: 2, defaultH: 4, minW: 2, minH: 3,
-    render: () => {
-      const { haEntities, sendHaCmd } = useWidgetContext()
-      return <LitterRobotStatus entities={haEntities} send={sendHaCmd} />
-    },
+    render: () => <HomeTiles type="litter" render={LitterStatus} />,
   }),
   def({
-    id: 'home.colony', label: 'Colony', category: 'HOME',
+    id: 'home.colony', label: 'Pets', category: 'HOME',
     defaultW: 2, defaultH: 4, minW: 2, minH: 3,
-    render: () => <ColonyTile entities={useWidgetContext().haEntities} />,
+    render: () => <HomeTiles type="pets" render={PetsTile} />,
   }),
   def({
     id: 'home.ambient', label: 'Ambient', category: 'HOME',
     defaultW: 2, defaultH: 4, minW: 2, minH: 3,
-    render: () => <AmbientTile entities={useWidgetContext().haEntities} />,
+    render: () => <HomeTiles type="ambient" render={AmbientTile} />,
+  }),
+  def({
+    id: 'home.thermostat', label: 'Thermostat', category: 'HOME',
+    defaultW: 2, defaultH: 4, minW: 2, minH: 3,
+    render: () => <HomeTiles type="thermostat" render={ThermostatTile} />,
   }),
 
   def({

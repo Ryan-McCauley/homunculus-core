@@ -19,10 +19,14 @@ interface Props {
   counts: Partial<Record<HomeView, number>>
   onNavigate: (next: HomeRoute) => void
   onOpenUplink: () => void
+  /** Opens the device-tile editor. Only meaningful on OVERVIEW, which is where
+   *  the tiles it edits are visible, so the chip is hidden elsewhere. */
+  onConfigure?: () => void
+  configuring?: boolean
   haVersion?: string | null
 }
 
-export function SubTabRail({ route, counts, onNavigate, onOpenUplink }: Props): JSX.Element {
+export function SubTabRail({ route, counts, onNavigate, onOpenUplink, onConfigure, configuring }: Props): JSX.Element {
   return (
     <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}>
       {HOME_VIEWS.map((view) => {
@@ -59,13 +63,30 @@ export function SubTabRail({ route, counts, onNavigate, onOpenUplink }: Props): 
         )
       })}
 
+      {onConfigure && route.view === 'overview' && (
+        <button
+          type="button"
+          className="holo-btn"
+          onClick={onConfigure}
+          aria-label="Configure device tiles"
+          aria-pressed={configuring === true}
+          style={{
+            marginLeft: 'auto', cursor: 'pointer',
+            color: configuring ? 'var(--holo)' : undefined,
+            borderColor: configuring ? 'var(--border-holo)' : undefined,
+          }}
+        >
+          <i className="ti ti-adjustments" style={{ marginRight: 4 }} />TILES
+        </button>
+      )}
+
       <button
         type="button"
         className="holo-btn"
         onClick={onOpenUplink}
         aria-label="Open the command uplink"
         data-agent-route={formatHomeRoute({ view: route.view, uplink: true })}
-        style={{ marginLeft: 'auto', cursor: 'pointer' }}
+        style={{ marginLeft: onConfigure && route.view === 'overview' ? 0 : 'auto', cursor: 'pointer' }}
       >
         ⌁ UPLINK <span style={{ fontSize: 10, color: 'var(--green-dim)', marginLeft: 4 }}>⌘K</span>
       </button>
