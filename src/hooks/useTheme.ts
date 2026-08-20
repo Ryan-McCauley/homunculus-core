@@ -9,11 +9,7 @@ export interface Theme {
 }
 
 export const THEMES: Theme[] = [
-<<<<<<< Updated upstream
-  { id: 'matrix', label: 'MATRIX', icon: '◈' },
-=======
   { id: 'dev', label: 'DEV', icon: '◈' },
->>>>>>> Stashed changes
   { id: 'prism', label: 'PRISM', icon: '◇' },
 ]
 
