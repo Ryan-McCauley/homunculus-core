@@ -1,7 +1,7 @@
 {
   "name": "homunculus-core",
   "version": "1.0.0",
-  "description": "A starship-bridge command interface for your home, computers, and data \u2014 powered by Claude.",
+  "description": "A starship-bridge command interface for your home, computers, and data — powered by Claude.",
   "author": "Ryan McCauley",
   "license": "MIT",
   "private": true,
@@ -17,7 +17,7 @@
     "icons": "electron scripts/make-icons.cjs",
     "build:web": "vite build --config vite.web.config.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "vitest run && npm run test:engine",
+    "test": "vitest run --coverage && npm run test:engine",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "rebuild": "electron-rebuild -f -w @homebridge/node-pty-prebuilt-multiarch",
@@ -48,6 +48,9 @@
   },
   "devDependencies": {
     "@electron/rebuild": "^3.6.0",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
     "@types/node": "^20.14.0",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
@@ -61,6 +64,7 @@
     "electron": "^31.0.0",
     "electron-builder": "^26.15.3",
     "electron-vite": "^2.3.0",
+    "jsdom": "^29.1.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "typescript": "^5.4.5",
@@ -70,7 +74,7 @@
   "build": {
     "appId": "com.ryanmccauley.homunculus",
     "productName": "Homunculus",
-    "copyright": "Copyright \u00a9 2026 Ryan McCauley",
+    "copyright": "Copyright © 2026 Ryan McCauley",
     "directories": {
       "output": "dist",
       "buildResources": "build"

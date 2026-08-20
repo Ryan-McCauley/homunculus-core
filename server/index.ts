@@ -48,7 +48,8 @@ import { stateStore } from './stateStore'
 import { claudeProcesses } from './claudeProcesses'
 import { componentKind, componentLabel, edgeForAudit } from '../shared/timeline'
 import type { TimelineComponent, TimelineEdge, TimelineEvent, TimelineRun } from '../shared/timeline'
-import { ACTOR_HEADER, ADMIN_TOKEN_HEADER, constantTimeEquals, deriveActor } from '../shared/audit'
+import { ACTOR_HEADER, constantTimeEquals, deriveActor } from '../shared/audit'
+import { isLocalReq, isAllowedOrigin, corsOrigin, securityHeaders, tokenVerdict, adminVerdict } from './httpGates'
 import { ALERT_SOURCES, ALERT_TIMEFRAMES } from '../shared/alerts'
 import { getLayout, setLayout, resetLayout, isSetupComplete, markSetupComplete } from './layout'
 import { buildManifest, getSyncConfig, readSyncFile, runSync, setSyncConfig, writeSyncFile } from './sync'
@@ -86,120 +87,25 @@ const MIME: Record<string, string> = {
   '.ico': 'image/x-icon'
 }
 
-// Whether a request originates from the home PC itself.
-function isLocalReq(req: http.IncomingMessage): boolean {
-  const ip = (req.socket.remoteAddress || '').replace(/^::ffff:/, '')
-  return ip === '127.0.0.1' || ip === '::1'
-}
-
-// ── Origin gate ─────────────────────────────────────────────────────────
-//
-// The localhost bypass below (and the WS upgrade handler's own copy of it) exists
-// for the desktop UI hitting its own backend — a real convenience. Its blind spot
-// is that a browser enforces none of that intent: ANY page open in the same
-// browser, on any domain, can fetch() or open a WebSocket to localhost:8787 and
-// is just as "local" by the isLocalReq test above. What tells the two apart is
-// the Origin header, which a browser attaches to every cross-origin fetch/XHR
-// and to every WebSocket handshake, and which script cannot forge.
-//
-// A non-browser caller (curl, a strategy skill, the sync peer-to-peer fetch)
-// sends no Origin at all — that is not a browser signature to trust, so an
-// ABSENT Origin falls through to whatever token gate already applies. A PRESENT
-// Origin that isn't this server's own origin (or, in dev, the Vite renderer) is
-// exactly what a malicious cross-site page looks like on the wire, and is
-// rejected outright before any handler — including the token check — runs.
-const DEV_ORIGINS = new Set(['http://localhost:5173', 'http://127.0.0.1:5173'])
-
-function isAllowedOrigin(req: http.IncomingMessage): boolean {
-  const origin = req.headers.origin
-  if (!origin) return true
-  if (DEV_ORIGINS.has(origin)) return true
-  try {
-    // Same-origin: the Origin's host:port equals whatever the client dialed
-    // (the Host header) — true whether that's localhost:8787 or a tailnet
-    // address:8787, and independent of which of those this node happens to be.
-    return new URL(origin).host === (req.headers.host || '')
-  } catch {
-    return false
-  }
-}
-
-// Token gate for sensitive routes (mirrors the WS upgrade handler): localhost is
-// always allowed; remote callers (e.g. the iPhone view over Tailscale) must
-// present HOMUNCULUS_TOKEN via ?token= or the x-homunculus-token header. Used to
-// protect /api/crypto/* so portfolio data isn't served unauthenticated off the
-// home PC. Returns true if allowed; otherwise writes 401 and returns false.
-//
-// This is the SECOND gate, not the only one: isAllowedOrigin() above has already
-// run for every /api/ request by the time this is called, so a request that
-// reaches here either carried no Origin (a trusted non-browser caller) or one
-// that matches this server. requireToken alone was never enough to stop a
-// same-machine browser page — that is what the Origin check is for.
+// The HTTP security posture — the Origin gate, the token gate, the admin gate,
+// the CORS reflection and the defensive headers — now lives in ./httpGates so it
+// can be read and tested as one unit. The wrappers below bind this process's
+// tokens and turn a verdict into a response; the behaviour is unchanged, and the
+// full reasoning for each gate moved with it.
 function requireToken(req: http.IncomingMessage, res: http.ServerResponse): boolean {
-  if (isLocalReq(req)) return true
-  const deny = (code: number, error: string): boolean => {
-    res.writeHead(code, { 'content-type': 'application/json', 'access-control-allow-origin': corsOrigin(req) })
-    res.end(JSON.stringify({ ok: false, error }))
-    return false
-  }
-  // An unconfigured gate is a CLOSED gate, exactly as requireAdminToken below has
-  // always treated it. This used to `return true` when TOKEN was empty, which made
-  // "no token configured" mean "no authentication at all" for every remote caller:
-  // published on a LAN or a tailnet, that served finance data, trade staging and
-  // the agent fleet to anyone who could reach the port. Localhost still bypasses
-  // (above) so the desktop app and the operator's own machine are unaffected.
-  if (!TOKEN) return deny(503, 'HOMUNCULUS_TOKEN is not configured — remote access is refused until it is set')
-  const url = new URL(req.url || '', 'http://localhost')
-  const raw = req.headers['x-homunculus-token']
-  const provided = url.searchParams.get('token') || (Array.isArray(raw) ? raw[0] : raw) || ''
-  if (constantTimeEquals(provided, TOKEN)) return true
-  return deny(401, 'unauthorized')
+  const verdict = tokenVerdict(req, TOKEN)
+  if (verdict.ok) return true
+  res.writeHead(verdict.code, { 'content-type': 'application/json', 'access-control-allow-origin': corsOrigin(req) })
+  res.end(JSON.stringify({ ok: false, error: verdict.error }))
+  return false
 }
 
-// Admin gate for audit-log management. Three deliberate differences from
-// requireToken: no localhost bypass, header only (a query-string secret leaks
-// into shell history and proxy logs), and constant-time comparison. When
-// HOMUNCULUS_ADMIN_TOKEN is unset the answer is 503, not 200 — an unconfigured
-// admin gate is a closed one. Audit *recording* never depends on this; it only
-// governs the annotate route, the sole sanctioned way to amend the record.
 function requireAdminToken(req: http.IncomingMessage, res: http.ServerResponse): boolean {
-  const deny = (code: number, error: string): boolean => {
-    res.writeHead(code, { 'content-type': 'application/json', 'access-control-allow-origin': corsOrigin(req) })
-    res.end(JSON.stringify({ ok: false, error }))
-    return false
-  }
-  if (!ADMIN_TOKEN) return deny(503, 'admin token not configured (set HOMUNCULUS_ADMIN_TOKEN)')
-  const raw = req.headers[ADMIN_TOKEN_HEADER]
-  const provided = Array.isArray(raw) ? raw[0] || '' : raw || ''
-  if (constantTimeEquals(provided, ADMIN_TOKEN)) return true
-  return deny(401, 'admin token required')
-}
-
-// The CORS response value for a request that has already passed isAllowedOrigin:
-// reflect the specific Origin back (never '*') so the browser's own same-origin
-// rules are what decide who can read the response. A caller with no Origin
-// (curl, a peer node, a skill) isn't a browser and ignores this header entirely.
-function corsOrigin(req: http.IncomingMessage): string {
-  return req.headers.origin || '*'
-}
-
-// Defensive headers on every response, API and static alike. nosniff and
-// no-referrer are cheap and standard. The CSP mirrors index.html's own <meta>
-// policy (Google Fonts, ws:/wss: for the transport) so it tightens nothing that
-// already works — except frame-ancestors and base-uri, which a <meta> CSP is
-// spec'd to ignore and only an HTTP header can enforce. frame-ancestors is the
-// one that matters most here: it closes the clickjacking angle CORS says
-// nothing about (a confirm-trade button framed invisibly on another site).
-function securityHeaders(): Record<string, string> {
-  return {
-    'x-content-type-options': 'nosniff',
-    'x-frame-options': 'DENY',
-    'referrer-policy': 'no-referrer',
-    'content-security-policy':
-      "default-src 'self'; connect-src 'self' ws: wss: http://localhost:* https://localhost:*; " +
-      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; " +
-      "script-src 'self'; frame-ancestors 'none'; base-uri 'none'",
-  }
+  const verdict = adminVerdict(req, ADMIN_TOKEN)
+  if (verdict.ok) return true
+  res.writeHead(verdict.code, { 'content-type': 'application/json', 'access-control-allow-origin': corsOrigin(req) })
+  res.end(JSON.stringify({ ok: false, error: verdict.error }))
+  return false
 }
 
 // ── API routes ────────────────────────────────────────────────────────

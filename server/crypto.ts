@@ -149,7 +149,7 @@ async function fetchTicker(symbol: string): Promise<Ticker | null> {
  *  sum. The newest bucket is the forming 4hr bar (built from however many hourly
  *  bars have printed so far, including Gemini's live in-progress 1hr candle). */
 const FOUR_H_MS = 4 * 60 * 60 * 1000
-function aggregateTo4h(hourly: Candle[]): Candle[] {
+export function aggregateTo4h(hourly: Candle[]): Candle[] {
   const out: Candle[] = []
   for (const c of hourly) {
     const bucket = Math.floor(c[0] / FOUR_H_MS) * FOUR_H_MS
@@ -661,17 +661,17 @@ async function cancelOrderVerified(orderId: string, waitForBalance = true): Prom
 
 // ── Indicator math ─────────────────────────────────────────────────────
 
-function closes(candles: Candle[]): number[] { return candles.map((c) => c[4]) }
-function highs(candles: Candle[]): number[] { return candles.map((c) => c[2]) }
-function lows(candles: Candle[]): number[] { return candles.map((c) => c[3]) }
-function volumes(candles: Candle[]): number[] { return candles.map((c) => c[5]) }
+export function closes(candles: Candle[]): number[] { return candles.map((c) => c[4]) }
+export function highs(candles: Candle[]): number[] { return candles.map((c) => c[2]) }
+export function lows(candles: Candle[]): number[] { return candles.map((c) => c[3]) }
+export function volumes(candles: Candle[]): number[] { return candles.map((c) => c[5]) }
 
-function sma(prices: number[], n: number): number | null {
+export function sma(prices: number[], n: number): number | null {
   if (prices.length < n) return null
   return prices.slice(-n).reduce((a, b) => a + b, 0) / n
 }
 
-function ema(prices: number[], n: number): number[] {
+export function ema(prices: number[], n: number): number[] {
   if (prices.length < n) return []
   const k = 2 / (n + 1)
   const result: number[] = []
@@ -686,7 +686,7 @@ function ema(prices: number[], n: number): number[] {
 
 /** Weighted moving average series (weight = position, most-recent heaviest).
  *  Returns one value per index where a full window is available (index n-1 onward). */
-function wmaSeries(prices: number[], n: number): number[] {
+export function wmaSeries(prices: number[], n: number): number[] {
   if (n < 1 || prices.length < n) return []
   const denom = (n * (n + 1)) / 2
   const out: number[] = []
@@ -702,7 +702,7 @@ function wmaSeries(prices: number[], n: number): number[] {
  *  Near-zero-lag trend line; used as the reversal "reclaim" trigger for bounce
  *  entries (price back above its fast Hull MA = the turn is confirmed, not a
  *  still-falling knife). Returns the latest HMA value, or null if too little data. */
-function hma(prices: number[], n: number): number | null {
+export function hma(prices: number[], n: number): number | null {
   const half = Math.round(n / 2)
   const sqrtN = Math.round(Math.sqrt(n))
   if (half < 1 || sqrtN < 1) return null
@@ -719,7 +719,7 @@ function hma(prices: number[], n: number): number | null {
 }
 
 /** On-Balance Volume as a full series (index i = OBV as of candles[i]). */
-function calcOBVSeries(candles: Candle[]): number[] {
+export function calcOBVSeries(candles: Candle[]): number[] {
   if (candles.length < 2) return []
   const out: number[] = [0]
   let obv = 0
@@ -739,7 +739,7 @@ function calcOBVSeries(candles: Candle[]): number[] {
  *  score thresholds in this file (RSI<30, <45, >70, etc.) were tuned against.
  *  A plain rolling-simple-average RSI (the old implementation) numerically diverges
  *  from this, especially in trending markets, which silently skews every threshold. */
-function wilderRsiSeries(prices: number[], period = 14): number[] {
+export function wilderRsiSeries(prices: number[], period = 14): number[] {
   if (prices.length < period + 1) return []
   const deltas: number[] = []
   for (let i = 1; i < prices.length; i++) deltas.push(prices[i]! - prices[i - 1]!)
@@ -751,7 +751,16 @@ function wilderRsiSeries(prices: number[], period = 14): number[] {
   avgGain /= period
   avgLoss /= period
   const series: number[] = []
-  const rsiFrom = (g: number, l: number): number => (l === 0 ? 100 : Number((100 - 100 / (1 + g / l)).toFixed(2)))
+  // Full precision, deliberately. This used to round each output to 2dp, which is
+  // display formatting done inside the maths — and it moved values across the very
+  // thresholds this file scores entries with. A true RSI of 29.9982 came back as
+  // exactly 30.00, so `rsiVal < 30` at the oversold gate below read FALSE and the
+  // entry silently lost its +20; the reverse (30.004 → 30.00) let a bar through the
+  // `rsi1h <= 30` gate it should have failed. shared/indicators.ts never rounded, so
+  // the alerts engine and this one disagreed about the same candle. Formatting now
+  // happens at the point of display via fmtRsi(); comparisons see the real number.
+  // Pinned by the 'RSI parity with shared/indicators' tests in cryptoIndicators.test.ts.
+  const rsiFrom = (g: number, l: number): number => (l === 0 ? 100 : 100 - 100 / (1 + g / l))
   series.push(rsiFrom(avgGain, avgLoss))
   for (let i = period; i < deltas.length; i++) {
     const d = deltas[i]!
@@ -764,7 +773,14 @@ function wilderRsiSeries(prices: number[], period = 14): number[] {
   return series
 }
 
-function rsi14(prices: number[]): number | null {
+/** An RSI value as it should appear in a report line: two decimals, '?' for null.
+ *  The ONLY place RSI precision is reduced — everything upstream of a string keeps
+ *  the full value so thresholds compare against the real number. See wilderRsiSeries. */
+export function fmtRsi(v: number | null | undefined): string {
+  return v === null || v === undefined ? '?' : v.toFixed(2)
+}
+
+export function rsi14(prices: number[]): number | null {
   const series = wilderRsiSeries(prices, 14)
   return series.length ? series[series.length - 1]! : null
 }
@@ -782,7 +798,7 @@ function rsi14(prices: number[]): number | null {
  *  drop needed). Returns null when there isn't enough history. This is a
  *  single-next-candle estimate: a real dip to the target may take several bars,
  *  so the caller pairs it with a hard stop + short expiry. */
-function predictPriceForRsi(
+export function predictPriceForRsi(
   prices: number[],
   targetRsi: number,
   period = 14,
@@ -818,7 +834,7 @@ function predictPriceForRsi(
   return { predictedPrice: lastClose - lossNeeded, lossNeeded, alreadyThere: false }
 }
 
-function calcMacd(prices: number[]): MACDReading | null {
+export function calcMacd(prices: number[]): MACDReading | null {
   if (prices.length < 35) return null
   const ema12 = ema(prices, 12)
   const ema26 = ema(prices, 26)
@@ -836,7 +852,7 @@ function calcMacd(prices: number[]): MACDReading | null {
   }
 }
 
-function bollingerBands(prices: number[], n = 20, stdDevMult = 2): BollingerReading | null {
+export function bollingerBands(prices: number[], n = 20, stdDevMult = 2): BollingerReading | null {
   if (prices.length < n) return null
   const slice = prices.slice(-n)
   const middle = slice.reduce((a, b) => a + b, 0) / n
@@ -857,7 +873,7 @@ function bollingerBands(prices: number[], n = 20, stdDevMult = 2): BollingerRead
 }
 
 /** On-Balance Volume: cumulative volume with direction tied to close vs prev close */
-function calcOBV(candles: Candle[]): number | null {
+export function calcOBV(candles: Candle[]): number | null {
   if (candles.length < 2) return null
   let obv = 0
   for (let i = 1; i < candles.length; i++) {
@@ -871,7 +887,7 @@ function calcOBV(candles: Candle[]): number | null {
 }
 
 /** ADX-14: trend strength 0-100. Returns { adx, plusDI, minusDI } */
-function calcADX(candles: Candle[], n = 14): { adx: number; plusDI: number; minusDI: number } | null {
+export function calcADX(candles: Candle[], n = 14): { adx: number; plusDI: number; minusDI: number } | null {
   if (candles.length < n * 2) return null
   const tr: number[] = []
   const plusDM: number[] = []
@@ -943,7 +959,7 @@ function calcADX(candles: Candle[], n = 14): { adx: number; plusDI: number; minu
 }
 
 /** VWAP: typical price × volume / cumulative volume */
-function calcVWAP(candles: Candle[]): number | null {
+export function calcVWAP(candles: Candle[]): number | null {
   if (candles.length < 2) return null
   // Use last session (last 96 candles for 15m ≈ 1 day, last 24 for 1hr)
   const session = candles.slice(-96)
@@ -957,7 +973,7 @@ function calcVWAP(candles: Candle[]): number | null {
 }
 
 /** Ichimoku Cloud (9/26/52) — returns key values relative to current price */
-function calcIchimoku(candles: Candle[]): {
+export function calcIchimoku(candles: Candle[]): {
   tenkan: number | null; kijun: number | null
   senkouA: number | null; senkouB: number | null
   aboveCloud: boolean | null; cloudBullish: boolean | null
@@ -989,7 +1005,7 @@ function calcIchimoku(candles: Candle[]): {
 }
 
 /** Stochastic RSI (3/3/14/14) — returns %K and %D in 0-100 range */
-function calcStochRSI(prices: number[], rsiPeriod = 14, stochPeriod = 14, kSmooth = 3, dSmooth = 3): { k: number; d: number } | null {
+export function calcStochRSI(prices: number[], rsiPeriod = 14, stochPeriod = 14, kSmooth = 3, dSmooth = 3): { k: number; d: number } | null {
   if (prices.length < rsiPeriod + stochPeriod + kSmooth + dSmooth) return null
   // Wilder-smoothed RSI series (was a rolling simple-average loop — see wilderRsiSeries).
   const rsiSeries = wilderRsiSeries(prices, rsiPeriod)
@@ -1017,7 +1033,7 @@ function calcStochRSI(prices: number[], rsiPeriod = 14, stochPeriod = 14, kSmoot
  *  may not correspond to real turning points (which can straddle the split boundary
  *  and produce false positives, or miss a real divergence whose pivots don't happen
  *  to land on either side of the midpoint). */
-function findPivots(values: number[], radius: number, kind: 'low' | 'high'): number[] {
+export function findPivots(values: number[], radius: number, kind: 'low' | 'high'): number[] {
   const pivots: number[] = []
   for (let i = radius; i < values.length - radius; i++) {
     const window = values.slice(i - radius, i + radius + 1)
@@ -1033,7 +1049,7 @@ function findPivots(values: number[], radius: number, kind: 'low' | 'high'): num
  *  Bullish: price makes a lower low but RSI makes a higher low → reversal signal.
  *  Bearish: price makes a higher high but RSI makes a lower high → reversal signal.
  *  Returns null if insufficient data, fewer than two pivots, or no divergence found. */
-function detectRSIDivergence(
+export function detectRSIDivergence(
   candles: Candle[],
   prices: number[],
   lookback = 20
@@ -1101,7 +1117,7 @@ function detectRSIDivergence(
  *  Hammer: small body near top of range, long lower wick ≥ 2× body — bullish reversal at lows.
  *  Bullish engulfing: current green candle body fully covers prior red candle body.
  *  Shooting star: inverse hammer at highs — bearish reversal. */
-function detectCandlePatterns(candles: Candle[]): string[] {
+export function detectCandlePatterns(candles: Candle[]): string[] {
   const patterns: string[] = []
   if (candles.length < 2) return patterns
   const [, open, high, low, close] = candles[candles.length - 1]!
@@ -1147,7 +1163,7 @@ function detectCandlePatterns(candles: Candle[]): string[] {
 
 /** Detect capitulation: unusually large-volume red candle at or near a recent low.
  *  Classic exhaustion signal that often precedes a bounce. */
-function detectCapitulation(candles: Candle[]): { detected: boolean; volumeMultiple: number } {
+export function detectCapitulation(candles: Candle[]): { detected: boolean; volumeMultiple: number } {
   if (candles.length < 20) return { detected: false, volumeMultiple: 0 }
   const last = candles[candles.length - 1]!
   const avgVol = candles.slice(-20, -1).reduce((s, c) => s + c[5], 0) / 19
@@ -1162,7 +1178,7 @@ function detectCapitulation(candles: Candle[]): { detected: boolean; volumeMulti
 }
 
 /** Fibonacci retracement levels from recent swing high/low */
-function calcFibLevels(candles: Candle[]): {
+export function calcFibLevels(candles: Candle[]): {
   swingHigh: number; swingLow: number
   levels: Record<string, number>
 } | null {
@@ -1190,9 +1206,9 @@ function calcFibLevels(candles: Candle[]): {
 // can reason over — support/resistance, range position, volatility, trend — so
 // it isn't flooded with thousands of raw rows.
 
-function recentSlice<T>(arr: T[], n: number): T[] { return arr.length > n ? arr.slice(-n) : arr }
+export function recentSlice<T>(arr: T[], n: number): T[] { return arr.length > n ? arr.slice(-n) : arr }
 
-function linregSlope(ys: number[]): number {
+export function linregSlope(ys: number[]): number {
   const n = ys.length
   if (n < 2) return 0
   const xs = ys.map((_, i) => i)
@@ -1300,11 +1316,11 @@ function computeTimeframeSignal(tf: Timeframe, candles: Candle[], lastPrice: num
 
   // ── RSI ──
   if (rsiVal !== null) {
-    if (rsiVal < 30) { reasons.push(`RSI ${rsiVal} oversold`); score += 20; bullishSignals++ }
-    else if (rsiVal < 40) { reasons.push(`RSI ${rsiVal} approaching oversold`); score += 8 }
-    else if (rsiVal > 70) { reasons.push(`RSI ${rsiVal} overbought`); score -= 20; bearishSignals++ }
-    else if (rsiVal > 60) { reasons.push(`RSI ${rsiVal} approaching overbought`); score -= 8 }
-    else reasons.push(`RSI ${rsiVal} neutral`)
+    if (rsiVal < 30) { reasons.push(`RSI ${fmtRsi(rsiVal)} oversold`); score += 20; bullishSignals++ }
+    else if (rsiVal < 40) { reasons.push(`RSI ${fmtRsi(rsiVal)} approaching oversold`); score += 8 }
+    else if (rsiVal > 70) { reasons.push(`RSI ${fmtRsi(rsiVal)} overbought`); score -= 20; bearishSignals++ }
+    else if (rsiVal > 60) { reasons.push(`RSI ${fmtRsi(rsiVal)} approaching overbought`); score -= 8 }
+    else reasons.push(`RSI ${fmtRsi(rsiVal)} neutral`)
   }
 
   // ── MACD ──
@@ -1788,7 +1804,7 @@ function buildIntelReport(tickers: Ticker[], signals: Signal[], holdings: Holdin
       }
       // Timeframe breakdown
       for (const tfSig of sig.timeframes) {
-        const rsiStr = tfSig.rsi14 !== null ? ` RSI:${tfSig.rsi14}` : ''
+        const rsiStr = tfSig.rsi14 !== null ? ` RSI:${fmtRsi(tfSig.rsi14)}` : ''
         const macdStr = tfSig.macd ? ` MACD:${tfSig.macd.histogram > 0 ? '▲' : '▼'}` : ''
         const bbStr = tfSig.bb ? ` BB:%B=${(tfSig.bb.percentB * 100).toFixed(0)}%` : ''
         portfolioLines.push(`  - ${tfSig.tf}: ${tfSig.direction} (${tfSig.strength})${rsiStr}${macdStr}${bbStr}`)
@@ -2195,12 +2211,12 @@ function buildIntelReport(tickers: Ticker[], signals: Signal[], holdings: Holdin
       const extras: string[] = []
       if (e.geminiFallback) extras.push('⚠ no CMC listing — volume gate fell back to Gemini-only')
       if (e.volRatio !== null) extras.push(`vol ${e.volRatio}× 20-bar`)
-      if (e.rsi4h !== null) extras.push(`4hr RSI ${e.rsi4h}`)
+      if (e.rsi4h !== null) extras.push(`4hr RSI ${fmtRsi(e.rsi4h)}`)
       // 1hr RSI depth: the strongest single win/loss discriminator in the retired-plan
       // analysis (0/9 winners at 1hr RSI >32). Flag a still-elevated 1hr as a caution —
       // a lower-band tag whose 1hr says the bottom isn't in yet is where the losers lived.
-      if (e.rsi1h !== null) extras.push(e.rsi1h > 35 ? `⚠ 1hr RSI ${e.rsi1h} (bottom likely not in)` : `1hr RSI ${e.rsi1h}✓`)
-      if (e.rsiDay !== null) extras.push(`1d RSI ${e.rsiDay}`)
+      if (e.rsi1h !== null) extras.push(e.rsi1h > 35 ? `⚠ 1hr RSI ${fmtRsi(e.rsi1h)} (bottom likely not in)` : `1hr RSI ${fmtRsi(e.rsi1h)}✓`)
+      if (e.rsiDay !== null) extras.push(`1d RSI ${fmtRsi(e.rsiDay)}`)
       if (e.pctBDay !== null) extras.push(`1d %B ${(e.pctBDay * 100).toFixed(0)}%`)
       if (e.divBull) extras.push('⚡ BULLISH DIV')
       if (e.reversalCandle) extras.push('🕯 reversal candle')
@@ -2221,7 +2237,7 @@ function buildIntelReport(tickers: Ticker[], signals: Signal[], holdings: Holdin
   const swing4hExitBlock = swing4hExitList.length === 0
     ? '  None — no held coin is at/above its 4hr upper band.\n'
     : swing4hExitList.map((e) =>
-        `  **${e.symbol}** $${px(Number(e.price))} | %B ${(e.pctB4h * 100).toFixed(0)}% at/above the upper band ($${px(e.upper)}) — TRIM/EXIT zone; midband $${px(e.mid)} is the round-trip target${e.rsi4h !== null ? ` · 4hr RSI ${e.rsi4h}` : ''}`
+        `  **${e.symbol}** $${px(Number(e.price))} | %B ${(e.pctB4h * 100).toFixed(0)}% at/above the upper band ($${px(e.upper)}) — TRIM/EXIT zone; midband $${px(e.mid)} is the round-trip target${e.rsi4h !== null ? ` · 4hr RSI ${fmtRsi(e.rsi4h)}` : ''}`
       ).join('\n')
 
   // Tradeable subsets computed ONCE so the concurrency advisories and the watch
@@ -2239,9 +2255,9 @@ function buildIntelReport(tickers: Ticker[], signals: Signal[], holdings: Holdin
     if (!list.length) return '  None currently.\n'
     return list.slice(0, 15).map((e) => {
       const rsiStr = [
-        e.rsi15m !== null ? `15m:${e.rsi15m}` : null,
-        e.rsi1hr !== null ? `1hr:${e.rsi1hr}` : null,
-        e.rsiDay !== null ? `1d:${e.rsiDay}` : null,
+        e.rsi15m !== null ? `15m:${fmtRsi(e.rsi15m)}` : null,
+        e.rsi1hr !== null ? `1hr:${fmtRsi(e.rsi1hr)}` : null,
+        e.rsiDay !== null ? `1d:${fmtRsi(e.rsiDay)}` : null,
       ].filter(Boolean).join(' | ')
       const extras: string[] = []
       if (e.stochK !== null) extras.push(`StochRSI K:${e.stochK}`)
@@ -2255,7 +2271,7 @@ function buildIntelReport(tickers: Ticker[], signals: Signal[], holdings: Holdin
       extras.push(e.freshTrigger ? 'TRIG✓' : 'no-trigger ✗gate')
       // 1hr-RSI floor (skills' hard gate for FAST/MICRO bounce entries) + the
       // predicted bottom price so a patient limit can rest AT it, not at the bid.
-      extras.push(e.floor1hOk ? '1hr-floor✓ (≤35)' : `1hr-floor ✗gate (1hr RSI ${e.rsi1hr ?? '?'} > 35 — no FAST/MICRO entry)`)
+      extras.push(e.floor1hOk ? '1hr-floor✓ (≤35)' : `1hr-floor ✗gate (1hr RSI ${fmtRsi(e.rsi1hr)} > 35 — no FAST/MICRO entry)`)
       // Already at/below RSI 28 → the inversion returns the current price (no
       // deeper drop needed); say so instead of printing a degenerate "band".
       if (e.rsi1hr !== null && e.rsi1hr <= 28) extras.push('🎯 1hr already ≤28 — bottom-grade NOW, patient limit at bid/recent-low')
@@ -2284,9 +2300,9 @@ function buildIntelReport(tickers: Ticker[], signals: Signal[], holdings: Holdin
     if (!list.length) return '  None currently.\n'
     return list.map((e) => {
       const rsiStr = [
-        e.rsi1hr !== null ? `1hr:${e.rsi1hr}` : null,
-        e.rsiDay !== null ? `1d:${e.rsiDay}` : null,
-        e.rsi15m !== null ? `15m:${e.rsi15m}` : null,
+        e.rsi1hr !== null ? `1hr:${fmtRsi(e.rsi1hr)}` : null,
+        e.rsiDay !== null ? `1d:${fmtRsi(e.rsiDay)}` : null,
+        e.rsi15m !== null ? `15m:${fmtRsi(e.rsi15m)}` : null,
       ].filter(Boolean).join(' | ')
       const extras: string[] = []
       if (e.divBullishHi) extras.push('⚡ HI-TF BULLISH DIV (reversal trigger)')
@@ -2476,15 +2492,15 @@ function buildIntelReport(tickers: Ticker[], signals: Signal[], holdings: Holdin
       const t1 = entryPx * 1.015 // fixed +1.5% (mid of the 1–2% band), full exit
       const stop = entryPx * 0.985 // −1.5% hard stop
       const rsiStr = [
-        c.rsi5m !== null ? `5m:${c.rsi5m}` : null,
-        c.rsi1m !== null ? `1m:${c.rsi1m}` : null,
-        c.e.rsi15m !== null ? `15m:${c.e.rsi15m}` : null,
-        c.e.rsi1hr !== null ? `1hr:${c.e.rsi1hr}` : null,
+        c.rsi5m !== null ? `5m:${fmtRsi(c.rsi5m)}` : null,
+        c.rsi1m !== null ? `1m:${fmtRsi(c.rsi1m)}` : null,
+        c.e.rsi15m !== null ? `15m:${fmtRsi(c.e.rsi15m)}` : null,
+        c.e.rsi1hr !== null ? `1hr:${fmtRsi(c.e.rsi1hr)}` : null,
       ].filter(Boolean).join(' ')
       const warming = c.warming ? ` _(${c.warming} — using 15m)_` : ''
       const deep = c.atTarget && c.primaryRsi !== null && c.primaryRsi < 25
       const bandStr = c.atTarget
-        ? `⚠️ ${deep ? 'DEEP — PAST ZONE' : 'AT TARGET NOW'} (${c.primaryTf} RSI ${c.primaryRsi}${deep ? ', below the 30–33 zone — bigger bounce but knife-risk' : ' ≤33 — stage/enter immediately'})`
+        ? `⚠️ ${deep ? 'DEEP — PAST ZONE' : 'AT TARGET NOW'} (${c.primaryTf} RSI ${fmtRsi(c.primaryRsi)}${deep ? ', below the 30–33 zone — bigger bounce but knife-risk' : ' ≤33 — stage/enter immediately'})`
         : `🎯 entry $${px(c.bandHi)}→$${px(c.bandLo)} (RSI33→30, ${c.primaryTf})` +
           (c.band1mHi !== null ? ` · 1m band $${px(c.band1mHi)}→$${px(c.band1mLo)}` : '')
       const distStr = c.distPct !== null ? ` · dist ${c.distPct >= 0 ? '−' : '+'}${Math.abs(c.distPct).toFixed(2)}% to zone` : ''
@@ -2567,8 +2583,8 @@ ${swingConcurrencyAdvisory(swingTradeable)}`],
 
 ${overboughtList.length === 0 ? '  None currently.\n' : overboughtList.slice(0, 10).map((e) => {
     const rsiStr = [
-      e.rsi15m !== null ? `15m:${e.rsi15m}` : null,
-      e.rsi1hr !== null ? `1hr:${e.rsi1hr}` : null,
+      e.rsi15m !== null ? `15m:${fmtRsi(e.rsi15m)}` : null,
+      e.rsi1hr !== null ? `1hr:${fmtRsi(e.rsi1hr)}` : null,
     ].filter(Boolean).join(' | ')
     const extras: string[] = []
     if (e.stochK !== null && e.stochK > 80) extras.push(`StochRSI K:${e.stochK}`)

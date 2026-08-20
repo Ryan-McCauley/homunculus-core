@@ -448,3 +448,253 @@ describe('postgres mirror (file-only path)', () => {
     expect(v.db).toBeUndefined()
   })
 })
+
+// ── Postgres mirror (connected path) ───────────────────────────────────────
+//
+// The file-only block above states, deliberately, that the DB-connected
+// behaviour is exercised against a real database because "mocking a driver would
+// only prove the mock works". That stays true for the part it was written about:
+// TRIGGER ENFORCEMENT. Whether Postgres actually refuses an UPDATE is a property
+// of Postgres, and nothing here claims to test it — a real database still owns
+// that, and migrate()'s trigger DDL is asserted only as "the statement was sent".
+//
+// What IS tested here is the application logic sitting on top of the driver,
+// which is ordinary branching that happens to take a query result as input:
+// verifyDb's divergent/extra/missing arithmetic, the send-queue overflow policy,
+// the flush-failure retry, and backfill's "only entries above MAX(seq)" choice.
+// Those are decisions this file makes, not the database, and they were the
+// uncovered half of the module. stateStore.test.ts already mocks `postgres` the
+// same way, so the harness below follows that precedent rather than inventing one.
+
+const pg = vi.hoisted(() => ({
+  responses: new Map<string, unknown[]>(),
+  calls: [] as string[],
+  throwOn: null as string | null,
+}))
+
+vi.mock('postgres', () => {
+  const factory = vi.fn((_url: string, _opts?: unknown) => {
+    const run = (text: string): Promise<unknown[]> => {
+      pg.calls.push(text)
+      if (pg.throwOn && text.includes(pg.throwOn)) {
+        return Promise.reject(new Error('simulated pg failure'))
+      }
+      let result: unknown[] = []
+      for (const [match, resp] of pg.responses) {
+        if (text.includes(match)) { result = resp; break }
+      }
+      const arr: any = [...result]
+      arr.count = result.length
+      return Promise.resolve(arr)
+    }
+    const sqlFn: any = vi.fn((strings: TemplateStringsArray, ..._values: unknown[]) =>
+      run(strings.join(' ').replace(/\s+/g, ' ').trim()))
+    sqlFn.unsafe = vi.fn((text: string) => run(text.replace(/\s+/g, ' ').trim()))
+    sqlFn.json = vi.fn((v: unknown) => v)
+    sqlFn.end = vi.fn(() => Promise.resolve())
+    return sqlFn
+  })
+  return { default: factory }
+})
+
+describe('postgres mirror (connected path)', () => {
+  const savedUrl = process.env['DATABASE_URL']
+
+  beforeEach(() => {
+    pg.responses.clear()
+    pg.calls.length = 0
+    pg.throwOn = null
+    process.env['DATABASE_URL'] = 'postgres://fake/db'
+    // Nothing in the table unless a test says otherwise.
+    pg.responses.set('SELECT MAX(seq)', [{ max: null }])
+  })
+  afterAll(() => {
+    if (savedUrl === undefined) delete process.env['DATABASE_URL']
+    else process.env['DATABASE_URL'] = savedUrl
+  })
+
+  it('connects, migrates, and reports connected', async () => {
+    const m = await freshModule()
+    await m.auditLog.start()
+
+    expect(m.auditLog.dbStatus()).toMatchObject({ connected: true })
+    expect(pg.calls.some((c) => c.includes('CREATE TABLE IF NOT EXISTS audit_log'))).toBe(true)
+  })
+
+  it('sends the append-only trigger DDL (enforcement itself is the database s job)', async () => {
+    const m = await freshModule()
+    await m.auditLog.start()
+
+    // Asserting the statements are ISSUED, not that Postgres honours them.
+    expect(pg.calls.some((c) => c.includes('CREATE OR REPLACE FUNCTION audit_log_append_only'))).toBe(true)
+    expect(pg.calls.some((c) => c.includes('CREATE TRIGGER audit_log_no_change'))).toBe(true)
+    expect(pg.calls.some((c) => c.includes('CREATE TRIGGER audit_log_no_truncate'))).toBe(true)
+  })
+
+  it('falls back to file-only and records the error when migration throws', async () => {
+    pg.throwOn = 'CREATE TABLE IF NOT EXISTS audit_log'
+    const m = await freshModule()
+    await m.auditLog.start()
+
+    const status = m.auditLog.dbStatus()
+    expect(status.connected).toBe(false)
+    expect(status.error).toMatch(/simulated pg failure/)
+    // The file half must be completely unaffected by a database outage.
+    expect(m.auditLog.record(sample)?.seq).toBe(1)
+    expect(allEntries()).toHaveLength(1)
+  })
+
+  it('backfills only the file entries the table is missing', async () => {
+    const m0 = await freshModule()
+    await m0.auditLog.start()          // connected, empty table
+    m0.auditLog.record(sample)
+    m0.auditLog.record({ ...sample, action: 'second' })
+    m0.auditLog.record({ ...sample, action: 'third' })
+
+    // Let the first instance finish its own fire-and-forget flushes before the
+    // call log is cleared, or its inserts land after the reset and get counted
+    // against the restart.
+    await new Promise((r) => setImmediate(r))
+
+    // Restart against a table that already holds seq 1–2.
+    vi.resetModules()
+    pg.calls.length = 0
+    pg.responses.set('SELECT MAX(seq)', [{ max: '2' }])
+    const m = await freshModule()
+    await m.auditLog.start()
+
+    const inserts = pg.calls.filter((c) => c.includes('INSERT INTO audit_log'))
+    expect(inserts).toHaveLength(1)     // only seq 3 was missing
+  })
+
+  it('keeps an entry queued when the insert fails, and reports the error', async () => {
+    const m = await freshModule()
+    await m.auditLog.start()
+
+    pg.throwOn = 'INSERT INTO audit_log'
+    m.auditLog.record(sample)
+    await new Promise((r) => setImmediate(r))
+
+    const status = m.auditLog.dbStatus()
+    expect(status.queued).toBeGreaterThan(0)
+    expect(status.error).toMatch(/simulated pg failure/)
+    // A database that is down must never cost an entry — the file still has it.
+    expect(allEntries()).toHaveLength(1)
+  })
+
+  it('drains the queue once the database comes back', async () => {
+    const m = await freshModule()
+    await m.auditLog.start()
+
+    pg.throwOn = 'INSERT INTO audit_log'
+    m.auditLog.record(sample)
+    await new Promise((r) => setImmediate(r))
+    expect(m.auditLog.dbStatus().queued).toBeGreaterThan(0)
+
+    pg.throwOn = null
+    m.auditLog.record({ ...sample, action: 'after recovery' })
+    await new Promise((r) => setImmediate(r))
+
+    expect(m.auditLog.dbStatus().queued).toBe(0)
+  })
+
+  it('closes the connection on stop()', async () => {
+    const m = await freshModule()
+    await m.auditLog.start()
+    await m.auditLog.stop()
+    expect(m.auditLog.dbStatus().connected).toBe(false)
+  })
+})
+
+// ── verifyDb: the file/table cross-check ───────────────────────────────────
+//
+// The triggers prevent tampering through SQL; this detects it when prevention is
+// bypassed (a superuser dropping a trigger, a row inserted straight into the
+// table). The comparison arithmetic below is this module's own logic, so it is
+// worth testing directly — a real database would only supply the same rows the
+// fake does here.
+
+describe('verifyDb', () => {
+  const savedUrl = process.env['DATABASE_URL']
+
+  beforeEach(() => {
+    pg.responses.clear()
+    pg.calls.length = 0
+    pg.throwOn = null
+    process.env['DATABASE_URL'] = 'postgres://fake/db'
+    pg.responses.set('SELECT MAX(seq)', [{ max: null }])
+  })
+  afterAll(() => {
+    if (savedUrl === undefined) delete process.env['DATABASE_URL']
+    else process.env['DATABASE_URL'] = savedUrl
+  })
+
+  /** Start connected, write `n` entries, and return the module + their raw lines. */
+  async function withEntries(n: number) {
+    const m = await freshModule()
+    await m.auditLog.start()
+    for (let i = 0; i < n; i++) m.auditLog.record({ ...sample, action: `act-${i}` })
+    await new Promise((r) => setImmediate(r))
+    const rows = allEntries().map((e) => ({ seq: String(e.seq), raw: JSON.stringify(e) }))
+    return { m, rows }
+  }
+
+  it('passes when every file entry has an identical row', async () => {
+    const { m, rows } = await withEntries(3)
+    pg.responses.set('SELECT seq::text, raw FROM audit_log', rows)
+
+    const res = await m.auditLog.verify()
+    expect(res.db).toMatchObject({ ok: true, rows: 3, missing: 0, divergent: [], extra: [] })
+  })
+
+  it('flags a row whose stored copy no longer matches the file', async () => {
+    const { m, rows } = await withEntries(3)
+    const tampered = rows.map((r, i) =>
+      i === 1 ? { ...r, raw: r.raw.replace('changed rsiMax', 'changed nothing at all') } : r)
+    pg.responses.set('SELECT seq::text, raw FROM audit_log', tampered)
+
+    const res = await m.auditLog.verify()
+    expect(res.db!.ok).toBe(false)
+    expect(res.db!.divergent).toEqual([2])
+    expect(res.db!.reason).toMatch(/no longer match the file/)
+  })
+
+  it('flags a row inserted into the table with no entry in any file', async () => {
+    const { m, rows } = await withEntries(2)
+    const planted = [...rows, { seq: '99', raw: JSON.stringify({ seq: 99, summary: 'planted' }) }]
+    pg.responses.set('SELECT seq::text, raw FROM audit_log', planted)
+
+    const res = await m.auditLog.verify()
+    expect(res.db!.ok).toBe(false)
+    expect(res.db!.extra).toEqual([99])
+    expect(res.db!.reason).toMatch(/inserted outside the log/)
+  })
+
+  it('counts file entries the table never received without failing the check', async () => {
+    const { m, rows } = await withEntries(3)
+    pg.responses.set('SELECT seq::text, raw FROM audit_log', rows.slice(0, 2))
+
+    const res = await m.auditLog.verify()
+    // Missing rows mean the mirror is behind, not that the record was altered —
+    // an outage looks exactly like this and must not read as tampering.
+    expect(res.db!.missing).toBe(1)
+    expect(res.db!.ok).toBe(true)
+  })
+
+  it('reports the query error instead of throwing when the table cannot be read', async () => {
+    const { m } = await withEntries(1)
+    pg.throwOn = 'SELECT seq::text, raw FROM audit_log'
+
+    const res = await m.auditLog.verify()
+    expect(res.db).toMatchObject({ ok: false, reason: expect.stringMatching(/simulated pg failure/) })
+  })
+
+  it('omits the db section entirely when file-only', async () => {
+    delete process.env['DATABASE_URL']
+    const m = await freshModule()
+    await m.auditLog.start()
+    m.auditLog.record(sample)
+
+    expect((await m.auditLog.verify()).db).toBeUndefined()
+  })
+})

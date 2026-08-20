@@ -262,3 +262,342 @@ describe('start() with DATABASE_URL set and a mocked postgres client', () => {
     expect(stateStore.status().connected).toBe(true)
   })
 })
+
+// ── Reconcile: the disaster-recovery path ──────────────────────────────────
+//
+// This is the half of the module that only runs when something has already gone
+// wrong — a wiped data/ directory, a torn write from a crash, a file and row that
+// disagree. It was entirely uncovered, which is the worst place to have no tests:
+// the code only executes on the day you most need it to be right.
+
+describe('reconcile — restoring from the database', () => {
+  it('writes a file back when Postgres has a row and the disk does not', async () => {
+    vi.stubEnv('DATABASE_URL', 'postgres://fake/db')
+    pg.responses.set('SELECT key, value FROM app_state', [
+      { key: 'crypto/trades.json', value: [{ id: 't1' }] },
+    ])
+    const { stateStore } = await freshModule()
+    await stateStore.start()
+
+    // This is the "delete data/ and the app rebuilds it" guarantee.
+    const file = join(DATA_ROOT, 'crypto', 'trades.json')
+    expect(fsState.files.has(file)).toBe(true)
+    expect(JSON.parse(fsState.files.get(file)!)).toEqual([{ id: 't1' }])
+  })
+
+  it('leaves a readable file alone when it agrees with the row', async () => {
+    vi.stubEnv('DATABASE_URL', 'postgres://fake/db')
+    const file = join(DATA_ROOT, 'agree.json')
+    fsState.files.set(file, JSON.stringify({ a: 1 }, null, 2))
+    pg.responses.set('SELECT key, value FROM app_state', [{ key: 'agree.json', value: { a: 1 } }])
+
+    const { stateStore } = await freshModule()
+    stateStore.readJson(file, {})
+    await stateStore.start()
+
+    expect(stateStore.status().divergent).toEqual([])
+  })
+})
+
+describe('reconcile — corrupt file quarantine', () => {
+  it('quarantines unparseable bytes and restores the row over them', async () => {
+    vi.stubEnv('DATABASE_URL', 'postgres://fake/db')
+    const file = join(DATA_ROOT, 'torn.json')
+    fsState.files.set(file, '{"half":')        // a torn write from a crash
+    pg.responses.set('SELECT key, value FROM app_state', [
+      { key: 'torn.json', value: { half: 'written', andThen: 'the rest' } },
+    ])
+
+    const { stateStore } = await freshModule()
+    await stateStore.start()
+
+    // The good row won...
+    expect(JSON.parse(fsState.files.get(file)!)).toEqual({ half: 'written', andThen: 'the rest' })
+    // ...and the corrupt bytes were kept aside for forensics, not destroyed.
+    const quarantined = [...fsState.files.keys()].filter((k) => k.includes('.corrupt-'))
+    expect(quarantined).toHaveLength(1)
+    expect(fsState.files.get(quarantined[0]!)).toBe('{"half":')
+  })
+
+  it('still restores when the file cannot be renamed out of the way', async () => {
+    vi.stubEnv('DATABASE_URL', 'postgres://fake/db')
+    const fs = await import('node:fs')
+    vi.mocked(fs.renameSync).mockImplementationOnce(() => { throw new Error('EPERM') })
+
+    const file = join(DATA_ROOT, 'locked.json')
+    fsState.files.set(file, 'not json at all')
+    pg.responses.set('SELECT key, value FROM app_state', [{ key: 'locked.json', value: { ok: true } }])
+
+    const { stateStore } = await freshModule()
+    await stateStore.start()
+
+    // The comment says "fall through and overwrite" — verify it actually does.
+    expect(JSON.parse(fsState.files.get(file)!)).toEqual({ ok: true })
+  })
+})
+
+describe('reconcile — divergence', () => {
+  it('reports a disagreement and lets the FILE win', async () => {
+    vi.stubEnv('DATABASE_URL', 'postgres://fake/db')
+    const file = join(DATA_ROOT, 'split.json')
+    fsState.files.set(file, JSON.stringify({ live: 'from disk' }))
+    pg.responses.set('SELECT key, value FROM app_state', [
+      { key: 'split.json', value: { live: 'stale from db' } },
+    ])
+
+    const { stateStore } = await freshModule()
+    stateStore.readJson(file, {})   // make the key known
+    await stateStore.start()
+
+    expect(stateStore.status().divergent).toContain('split.json')
+    // The file is what the hubs already read into memory — it must not be reverted.
+    expect(JSON.parse(fsState.files.get(file)!)).toEqual({ live: 'from disk' })
+    expect(pg.calls.some((c) => c.includes('INSERT INTO app_state'))).toBe(true)
+  })
+
+  it('does NOT call a key divergent merely because JSONB reordered its keys', async () => {
+    vi.stubEnv('DATABASE_URL', 'postgres://fake/db')
+    const file = join(DATA_ROOT, 'ordered.json')
+    fsState.files.set(file, JSON.stringify({ b: 2, a: 1 }))       // disk order
+    pg.responses.set('SELECT key, value FROM app_state', [
+      { key: 'ordered.json', value: { a: 1, b: 2 } },              // JSONB order
+    ])
+
+    const { stateStore } = await freshModule()
+    stateStore.readJson(file, {})
+    await stateStore.start()
+
+    // Without canonical comparison this would flag every key on every boot.
+    expect(stateStore.status().divergent).toEqual([])
+  })
+})
+
+// ── Tombstones: deletes that must not resurrect ────────────────────────────
+
+describe('deleteJson tombstones', () => {
+  it('issues a DELETE against Postgres when connected', async () => {
+    vi.stubEnv('DATABASE_URL', 'postgres://fake/db')
+    pg.responses.set('SELECT key, value FROM app_state', [])
+    const { stateStore } = await freshModule()
+    await stateStore.start()
+
+    const file = join(DATA_ROOT, 'gone.json')
+    fsState.files.set(file, JSON.stringify({ x: 1 }))
+    stateStore.deleteJson(file)
+    await new Promise((r) => setImmediate(r))   // let the fire-and-forget settle
+
+    expect(fsState.files.has(file)).toBe(false)
+    expect(pg.calls.some((c) => c.includes('DELETE FROM app_state WHERE key ='))).toBe(true)
+  })
+
+  it('retries a failed delete on the next flush rather than dropping it', async () => {
+    vi.stubEnv('DATABASE_URL', 'postgres://fake/db')
+    pg.responses.set('SELECT key, value FROM app_state', [])
+    const { stateStore } = await freshModule()
+    await stateStore.start()
+
+    // The database rejects the delete — an outage mid-delete.
+    pg.throwOn = 'DELETE FROM app_state'
+    const file = join(DATA_ROOT, 'stubborn.json')
+    fsState.files.set(file, JSON.stringify({ x: 1 }))
+    stateStore.deleteJson(file)
+    await new Promise((r) => setImmediate(r))
+
+    const attemptsWhileDown = pg.calls.filter((c) => c.includes('DELETE FROM app_state')).length
+    expect(attemptsWhileDown).toBeGreaterThan(0)
+
+    // Database comes back; any subsequent write drags the pending delete along.
+    pg.throwOn = null
+    stateStore.writeJson(join(DATA_ROOT, 'other.json'), { y: 2 })
+    await new Promise((r) => setImmediate(r))
+
+    // If the tombstone had been dropped, the row would survive and the next boot's
+    // reconcile would write the file back — the resurrection this exists to prevent.
+    expect(pg.calls.filter((c) => c.includes('DELETE FROM app_state')).length)
+      .toBeGreaterThan(attemptsWhileDown)
+  })
+})
+
+// ── Flush failure ──────────────────────────────────────────────────────────
+
+describe('flush failure handling', () => {
+  it('records the error and keeps the value queued instead of losing it', async () => {
+    vi.stubEnv('DATABASE_URL', 'postgres://fake/db')
+    pg.responses.set('SELECT key, value FROM app_state', [])
+    const { stateStore } = await freshModule()
+    await stateStore.start()
+
+    pg.throwOn = 'INSERT INTO app_state'
+    stateStore.writeJson(join(DATA_ROOT, 'queued.json'), { v: 1 })
+    await new Promise((r) => setImmediate(r))
+
+    const status = stateStore.status()
+    expect(status.error).toMatch(/simulated pg failure/)
+    expect(status.queued).toBeGreaterThan(0)
+    // The file half of the write still succeeded — Postgres is the backup, not the truth.
+    expect(fsState.files.has(join(DATA_ROOT, 'queued.json'))).toBe(true)
+  })
+})
+
+// ── Shutdown ───────────────────────────────────────────────────────────────
+
+describe('stop()', () => {
+  it('closes the connection and reports disconnected', async () => {
+    vi.stubEnv('DATABASE_URL', 'postgres://fake/db')
+    pg.responses.set('SELECT key, value FROM app_state', [])
+    const { stateStore } = await freshModule()
+    await stateStore.start()
+    expect(stateStore.status().connected).toBe(true)
+
+    await stateStore.stop()
+    expect(stateStore.status().connected).toBe(false)
+  })
+
+  it('does not throw when a final flush fails on the way down', async () => {
+    vi.stubEnv('DATABASE_URL', 'postgres://fake/db')
+    pg.responses.set('SELECT key, value FROM app_state', [])
+    const { stateStore } = await freshModule()
+    await stateStore.start()
+
+    stateStore.writeJson(join(DATA_ROOT, 'last.json'), { v: 1 })
+    pg.throwOn = 'INSERT INTO app_state'
+    await expect(stateStore.stop()).resolves.toBeUndefined()
+  })
+
+  it('is safe to call without ever having connected', async () => {
+    const { stateStore } = await freshModule()
+    await expect(stateStore.stop()).resolves.toBeUndefined()
+  })
+})
+
+// ── Relational writes ──────────────────────────────────────────────────────
+
+describe('run persistence', () => {
+  const run = {
+    id: 'r1', component: 'crypto', label: 'swing scan', trigger: 'interval',
+    startedAt: 1_000, endedAt: null, state: 'running', summary: '',
+  }
+
+  it('upserts a run so the finishing edge updates the same row', async () => {
+    vi.stubEnv('DATABASE_URL', 'postgres://fake/db')
+    pg.responses.set('SELECT key, value FROM app_state', [])
+    const { stateStore } = await freshModule()
+    await stateStore.start()
+
+    await stateStore.saveRun(run)
+    await stateStore.saveRun({ ...run, endedAt: 2_000, state: 'ok', summary: 'done' })
+
+    const inserts = pg.calls.filter((c) => c.includes('INSERT INTO agent_runs'))
+    expect(inserts).toHaveLength(2)
+    expect(inserts[0]).toContain('ON CONFLICT (id) DO UPDATE SET')
+  })
+
+  it('swallows a write failure rather than taking the run down with it', async () => {
+    vi.stubEnv('DATABASE_URL', 'postgres://fake/db')
+    pg.responses.set('SELECT key, value FROM app_state', [])
+    const { stateStore } = await freshModule()
+    await stateStore.start()
+
+    pg.throwOn = 'INSERT INTO agent_runs'
+    await expect(stateStore.saveRun(run)).resolves.toBeUndefined()
+  })
+
+  it('is a no-op in file-only mode', async () => {
+    const { stateStore } = await freshModule()
+    await expect(stateStore.saveRun(run)).resolves.toBeUndefined()
+    expect(pg.calls).toHaveLength(0)
+  })
+
+  it('readRuns returns rows when connected and [] when the query fails', async () => {
+    vi.stubEnv('DATABASE_URL', 'postgres://fake/db')
+    pg.responses.set('SELECT key, value FROM app_state', [])
+    pg.responses.set('FROM agent_runs', [{ id: 'r1' }])
+    const { stateStore } = await freshModule()
+    await stateStore.start()
+
+    expect([...await stateStore.readRuns(0, 9_999)]).toEqual([{ id: 'r1' }])
+
+    pg.throwOn = 'FROM agent_runs'
+    expect(await stateStore.readRuns(0, 9_999)).toEqual([])
+  })
+
+  it('readRuns returns [] in file-only mode', async () => {
+    const { stateStore } = await freshModule()
+    expect(await stateStore.readRuns(0, 1)).toEqual([])
+  })
+
+  it('readAuditWindow returns rows when connected and [] when the query fails', async () => {
+    vi.stubEnv('DATABASE_URL', 'postgres://fake/db')
+    pg.responses.set('SELECT key, value FROM app_state', [])
+    pg.responses.set('FROM audit_log', [{ actor: 'operator' }])
+    const { stateStore } = await freshModule()
+    await stateStore.start()
+
+    expect([...await stateStore.readAuditWindow(0, 9_999)]).toEqual([{ actor: 'operator' }])
+
+    pg.throwOn = 'FROM audit_log'
+    expect(await stateStore.readAuditWindow(0, 9_999)).toEqual([])
+  })
+})
+
+describe('saveClosedTrades', () => {
+  const trade = { id: 'c1', symbol: 'BTCUSD', realizedUsd: 12.5, closedAt: 5_000 }
+
+  it('writes each row and counts them', async () => {
+    vi.stubEnv('DATABASE_URL', 'postgres://fake/db')
+    pg.responses.set('SELECT key, value FROM app_state', [])
+    const { stateStore } = await freshModule()
+    await stateStore.start()
+
+    expect(await stateStore.saveClosedTrades([trade, { ...trade, id: 'c2' }])).toBe(2)
+    expect(pg.calls.filter((c) => c.includes('INSERT INTO closed_trades'))).toHaveLength(2)
+  })
+
+  it('stops at the first failure and reports how many landed', async () => {
+    vi.stubEnv('DATABASE_URL', 'postgres://fake/db')
+    pg.responses.set('SELECT key, value FROM app_state', [])
+    const { stateStore } = await freshModule()
+    await stateStore.start()
+
+    pg.throwOn = 'INSERT INTO closed_trades'
+    expect(await stateStore.saveClosedTrades([trade])).toBe(0)
+  })
+
+  it('short-circuits on an empty list and in file-only mode', async () => {
+    const { stateStore } = await freshModule()
+    expect(await stateStore.saveClosedTrades([])).toBe(0)
+    expect(await stateStore.saveClosedTrades([trade])).toBe(0)
+    expect(pg.calls).toHaveLength(0)
+  })
+})
+
+describe('savePortfolioHistory', () => {
+  const point = { at: 1_000, btc: 0.5, usd: 100, totalUsd: 30_100, btcPrice: 60_000 }
+
+  it('inserts one row per point', async () => {
+    vi.stubEnv('DATABASE_URL', 'postgres://fake/db')
+    pg.responses.set('SELECT key, value FROM app_state', [])
+    const { stateStore } = await freshModule()
+    await stateStore.start()
+
+    await stateStore.savePortfolioHistory([point, { ...point, at: 2_000 }])
+    expect(pg.calls.filter((c) => c.includes('INSERT INTO portfolio_history'))).toHaveLength(2)
+  })
+
+  it('swallows a write failure', async () => {
+    vi.stubEnv('DATABASE_URL', 'postgres://fake/db')
+    pg.responses.set('SELECT key, value FROM app_state', [])
+    const { stateStore } = await freshModule()
+    await stateStore.start()
+
+    pg.throwOn = 'INSERT INTO portfolio_history'
+    await expect(stateStore.savePortfolioHistory([point])).resolves.toBeUndefined()
+  })
+
+  it('short-circuits on an empty series and in file-only mode', async () => {
+    const { stateStore } = await freshModule()
+    await stateStore.savePortfolioHistory([])
+    await stateStore.savePortfolioHistory([point])
+    expect(pg.calls).toHaveLength(0)
+  })
+})
